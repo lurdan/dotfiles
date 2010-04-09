@@ -1,0 +1,17 @@
+*.elc
+semantic.cache
+auto-save-list
+*.o
+*.lo
+*.la
+#*#
+.*.rej
+*.rej
+.*~
+*~
+.#*
+.DS_Store
+*.sw[po]
+tags
+._*
+

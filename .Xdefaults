@@ -1,0 +1,33 @@
+#Rxvt.saveLines: 32767
+Rxvt.saveLines:0
+Rxvt.termName: rxvt-256color
+Rxvt.transparent: true
+Rxvt.inheritPixmap: True
+Rxvt.tintColor: pink
+Rxvt.foreground: snow
+Rxvt.background: black
+Rxvt.cursorColor: green
+Rxvt.shading: 15
+Rxvt.preeditType: root
+Rxvt.scrollBar: off
+Rxvt.depth: 32
+
+Rxvt.font: xft:M+1VM+IPAG circle:size=10:antialias=true
+Rxvt.boldFont: xft:M+1VM+IPAG circle:size=10antialias=true
+Rxvt.color0: #2E3436
+Rxvt.color1: #CC0000
+Rxvt.color2: #4E9A06
+Rxvt.color3: #C4A000
+Rxvt.color4: #3465A4
+Rxvt.color5: #75507B
+Rxvt.color6: #06989A
+Rxvt.color7: #D3D7CF
+Rxvt.color8: #555753
+Rxvt.color9: #EF2929
+Rxvt.color10: #8AE234
+Rxvt.color11: #FCE94F
+Rxvt.color12: #729FCF
+Rxvt.color13: #AD7FA8
+Rxvt.color14: #34E2E2
+Rxvt.color15: #EEEEEC
+

@@ -1,0 +1,12 @@
+[ -x /usr/bin/feh ] && eval `cat $HOME/.fehbg` &
+#xsetroot -solid midnightblue
+#xscreensaver -no-splash &
+
+[ -x /usr/bin/trayer ] && trayer --edge top --align right --SetDockType true \
+  --SetPartialStrut true --expand true --width 15 --transparent true \
+  --tint 0x191970 --height 18 &
+[ -x /usr/bin/urxvtd ] && urxvtd -q -f -o
+
+[ -x /usr/bin/nm-applet ] && nm-applet --sm-disable &
+[ -x /usr/bin/gnome-power-manager ] && gnome-power-manager &
+

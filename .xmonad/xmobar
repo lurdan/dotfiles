@@ -1,0 +1,20 @@
+Config { font = "xft:vlgothic:size=6:bold"
+       , bgColor = "black"
+       , fgColor = "grey"
+       , position = Static { xpos = 0, ypos = 0, width = 1224, height = 18 }
+       , lowerOnStart = True
+       , commands = [ Run Weather "RJOO" ["-t","<station>: <tempC>C","-L","18","-H","25","--normal","green","--high","red","--low","lightblue"] 36000
+                    , Run Network "wlan0" ["-L","0","-H","32","--normal","green","--high","red"] 10
+                    , Run Network "eth0"  ["-L","0","-H","32","--normal","green","--high","red"] 10
+		    , Run Network "br0" ["-L","0","-H","32","--normal","green","--high","red"] 10
+                    , Run Cpu ["-L","30","-H","80","-l","lightblue","-n","green","-h","red"] 10
+                    , Run Memory ["-t","Mem: <usedratio>%"] 10
+                    , Run Swap [] 10
+                    , Run Com "uname" ["-s","-r"] "" 36000
+    		    , Run Date "%Y/%m/%d (%a) %H:%M:%S" "date" 10
+                    , Run StdinReader
+                    ]
+       , sepChar = "%"
+       , alignSep = "}{"
+       , template = "%StdinReader% }{ %cpu%| %memory%, %swap%| %wlan0%| %br0%| <fc=#ee9a00>%date%</fc>"
+       }

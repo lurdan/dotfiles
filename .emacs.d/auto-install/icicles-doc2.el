@@ -7,9 +7,9 @@
 ;; Copyright (C) 1996-2009, Drew Adams, all rights reserved.
 ;; Created: Tue Aug  1 14:21:16 1995
 ;; Version: 22.0
-;; Last-Updated: Fri Apr  9 15:53:04 2010 (-0700)
+;; Last-Updated: Sat May 22 09:46:43 2010 (-0700)
 ;;           By: dradams
-;;     Update #: 26820
+;;     Update #: 26964
 ;; URL: http://www.emacswiki.org/cgi-bin/wiki/icicles-doc2.el
 ;; Keywords: internal, extensions, help, abbrev, local, minibuffer,
 ;;           keys, apropos, completion, matching, regexp, command
@@ -314,7 +314,7 @@
 ;;  See Also:
 ;;
 ;;  * The doc string (`C-h f') of command `icicle-search'; it provides
-;;    general information about Icicles search.
+;;    a boatload of general information about Icicles search.
 ;;
 ;;  * (@> "Other Icicles Search Commands") for specialized Icicles
 ;;    search commands, including search in particular buffers.
@@ -521,7 +521,19 @@
 ;;     to limit the set of search contexts.  See also
 ;;     (@file :file-name "icicles-doc1.el" :to "Chip Away the Non-Elephant").
 ;;
-;;  10. You can replace text while you search, forward, backward, or
+;;  10. You can sort the search hits in various ways.  This can
+;;     facilitate navigation and comparison of hits, as well as
+;;     search-and-replace (see #11).  And you can define your own
+;;     Icicles search commands that provide custom search orders for
+;;     particular kinds of search.  It is likely that you have never
+;;     considered being able to sort search hits, but if you think
+;;     about it you will see that this can be handy.  If you are
+;;     searching across multiple buffers, files, or bookmarks, sorting
+;;     helps you compare, visit, and replace related hits from the
+;;     different sources, instead of having to handle all of the hits
+;;     from each source in turn.
+;;
+;;  11. You can replace text while you search, forward, backward, or
 ;;     randomly.  You can replace entire search contexts or just the
 ;;     parts that match your current input.  You can use any
 ;;     replacement string that is allowed by `query-replace-regexp'.
@@ -533,7 +545,7 @@
 ;;     You can use `M-|' (`icicle-all-candidates-list-alt-action') to
 ;;     replace all matches.  See (@> "Search and Replace").
 ;;
-;;  11. When you visit a search context (using `C-mouse-2' or
+;;  12. When you visit a search context (using `C-mouse-2' or
 ;;     `C-next', for example), the part of the candidate that matches
 ;;     your input is highlighted.  An entire search context is
 ;;     highlighted in face `icicle-search-main-regexp-current', and
@@ -541,14 +553,15 @@
 ;;     `icicle-search-current-input'.  All other search contexts are
 ;;     also highlighted (in face `icicle-search-main-regexp-others').
 ;;
-;;  12. User option `icicle-search-highlight-all-current-flag'
+;;  13. User option `icicle-search-highlight-all-current-flag'
 ;;     controls whether the input matches are highlighted within each
 ;;     search context or only within the current context.  It,
 ;;     together with `icicle-expand-input-to-common-match-flag',
-;;     control whether the input-match highlighting covers an expanded
-;;     common match among all matches or just the exact input match.
+;;     controls whether the input-match highlighting covers an
+;;     expanded common match among all matches or just the exact input
+;;     match.
 ;;
-;;  13. If you do not use a subgroup to define the search context (as
+;;  14. If you do not use a subgroup to define the search context (as
 ;;     in #3, above), that is, if the search context corresponds to
 ;;     the entire search regexp, then up to eight context levels
 ;;     (subgroups) are each highlighted differently, using faces
@@ -557,11 +570,13 @@
 ;;     highlighting is not done if user option
 ;;     `icicle-search-highlight-context-levels-flag' is nil.
 ;;
-;;  You might have noticed that out of these 13 search features, 6
+;;  You might have noticed that out of these 14 search features, 6
 ;;  constitute independent ways in which you can narrow or limit the
-;;  set of search hits among which you can navigate.  Restricting the
-;;  search space is in fact what search is all about, and Icicles
-;;  offers you some unique tools to do this.
+;;  set of search hits among which you can navigate.  And another one
+;;  (sorting) further facilitates your observation and selection of
+;;  search hits.  Restricting the search space and making search-hit
+;;  patterns more evident are in fact what search is all about, and
+;;  Icicles offers you some unique tools to do this.
 ;;
 ;;  For several Icicles search commands, including `icicle-search'
 ;;  (`C-c `'), you provide an initial regexp to define the search
@@ -692,6 +707,30 @@
 ;;    `icicles-doc1.el' highlights not `edit' but
 ;;    ``abort-recursive-edit'', which is the longest common match
 ;;    among all input matches.
+;;
+;;    Gotcha: Remember that the expanded common match pertains to the
+;;            entire completion candidate.  In the context of Icicles
+;;            search, if you are interested in multiple matches of
+;;            your input within the same search context, and you want
+;;            to be sure to catch each match, then turn off
+;;            common-match expansion.
+;;
+;;            Why?  The search context as a whole is compared with the
+;;            other search contexts when looking for the expanded
+;;            common match.  Your input is matched against the entire
+;;            context (search hit), and the expanded common match is
+;;            (typically) the longest match that is common to the
+;;            other search contexts.  Do not expect the longest common
+;;            match of your input against all occurrences in the
+;;            search contexts.  What counts is the longest single
+;;            match for a given context.
+;;
+;;            For example, if your input is `then' and two of the
+;;            search hits are `But then X and then Y' and `W and then
+;;            Z', the expanded common match will be `and then', not
+;;            `then'.  The matches highlighted for your input thus do
+;;            not include each occurrence of `then' in the search
+;;            hits, but rather each occurrence of `and then'.
 ;;
 ;;    If `icicle-expand-input-to-common-match-flag',
 ;;    `icicle-search-highlight-all-current-flag', and
@@ -824,7 +863,7 @@
 ;;   "^\\s-*(\\(def\\(c\\(onst\\(ant\\)?\\|ustom\\)\\|ine-symbol-macro
 ;;   \\|parameter\\|var\\)\\)\\s-+\\(\\(\\sw\\|\\s_\\)+\\)"
 ;;
-;;  You certainly don't want to type a regexp like that into the
+;;  You certainly do not want to type a regexp like that into the
 ;;  minibuffer (and the function-definition regexp is twice as
 ;;  complex)!  Put it into a variable or register once and use `C-='
 ;;  or `C-x r i' from then on to retrieve it - simple.
@@ -930,12 +969,18 @@
 ;;  Search and Replace
 ;;  ------------------
 ;;
+;;  Replacement during Icicles search is something quite different
+;;  from anything you are used to.  There are several different ways
+;;  to replace search-hit text during Icicles search, and it can be a
+;;  bit of a challenge to understand all the possibilities.  So my
+;;  advice is to experiment, as well as to read the descriptions here.
+;;
 ;;  You can replace the current search match by using any of the
 ;;  alternative action keys: `C-S-RET', `C-S-mouse-2' (in
 ;;  `*Completions*'), `C-S-next', `C-S-prior', `C-S-down', and
 ;;  `C-S-up'.  You can use `M-|'
 ;;  (`icicle-all-candidates-list-alt-action') to replace all matches
-;;  in the search space at once.
+;;  of your current input at once, throughout the search space.
 ;;
 ;;  At the first use of any of these, you are prompted for the
 ;;  replacement pattern; it is used thereafter, or until you use `M-,'
@@ -960,8 +1005,10 @@
 ;;
 ;;   * In Icicles search, replace-all (`M-|') means replace all
 ;;     matches of your current input, throughout the search space, not
-;;     just all matches that follow the cursor.  (Remember too that
-;;     you can activate the region to limit the search space.)
+;;     just all matches that follow the cursor.  And remember that you
+;;     can (a) activate the region to limit the search-and-replace
+;;     space and (b) use progressive completion etc. to narrow the set
+;;     of hits.
 ;;
 ;;   * You can act across multiple buffers, files, or bookmarks -
 ;;     see information about the `icicle-search' prefix arg.
@@ -1002,28 +1049,28 @@
 ;;     Together with other options, it controls whether to replace the
 ;;     expanded common match or just the exact match.  See below.
 ;;
-;;  Remember this:
+;;  REMEMBER THIS:
 ;;
-;;  - If `icicle-search-replace-whole-candidate-flag' is non-nil, then
-;;    the granularity of replacement is a complete search context.  In
-;;    this case, replacement behaves similarly to
+;;  - If `icicle-search-replace-whole-candidate-flag' is true
+;;    (non-nil), then the granularity of replacement is a complete
+;;    search context.  In this case, replacement behaves similarly to
 ;;    `query-replace-regexp' (except that special replacement
 ;;    constructs, such as `\#', are not treated as such).  You can
 ;;    still use minibuffer input to filter the set of search contexts,
 ;;    but replacement is on a whole-context basis.
 ;;
-;;  - If `icicle-search-replace-whole-candidate-flag' is nil, then you
-;;    can replace multiple input matches separately within a search
-;;    context (using `C-S-RET').  This behavior is unique to Icicles.
-;;    You cannot, however skip over one input match and replace the
-;;    next one in the same context - `C-S-RET' always replaces the
-;;    first available match in the context (repeated use changes which
-;;    is first).  When `icicle-search-replace-whole-candidate-flag' is
-;;    nil, you can also use special replacement constructs, such as
-;;    `\#'.
+;;  - If `icicle-search-replace-whole-candidate-flag' is false (nil),
+;;    then you can replace multiple input matches separately within a
+;;    search context (using `C-S-RET').  This behavior is unique to
+;;    Icicles.  You cannot, however skip over one input match and
+;;    replace the next one in the same context - `C-S-RET' always
+;;    replaces the first available match in the context (repeated use
+;;    changes which is first).  When
+;;    `icicle-search-replace-whole-candidate-flag' is nil, you can
+;;    also use special replacement constructs, such as `\#'.
 ;;
-;;  If `icicle-search-replace-whole-candidate-flag' is non-nil, then
-;;  you can use the navigational alternative action keys, `C-S-next',
+;;  If `icicle-search-replace-whole-candidate-flag' is true, then you
+;;  can use the navigational alternative action keys, `C-S-next',
 ;;  `C-S-prior', `C-S-down', and `C-S-up', repeatedly to replace
 ;;  successive search contexts.  At the buffer limits, these commands
 ;;  wrap around to the other buffer limit (last search context to
@@ -1032,20 +1079,32 @@
 ;;  Search traversal using these go-to-next-context-and-replace keys
 ;;  is always by search context, not by individual input match.  This
 ;;  means that you cannot use these keys to replace input matches
-;;  within a search context (except for the first such match, if
-;;  `icicle-search-replace-whole-candidate-flag' is nil).
+;;  within a search context.
 ;;
-;;  If your input matches multiple parts of a search context, and you
-;;  want to replace these in order, then use `C-S-RET' repeatedly.
-;;  You can traverse all matches of your input in the order they
-;;  appear in the buffer by repeating `C-S-RET' (provided the
-;;  replacement text does not also match your input - see below).  At
-;;  the buffer limits, repeating `C-S-RET' wraps around too.
+;;  If `icicle-search-replace-whole-candidate-flag' is false, then you
+;;  can use these keys to replace the first input match.  More
+;;  importantly, you can use `C-S-RET' to replace that first match,
+;;  without moving on to the next context.  Because `C-S-RET' always
+;;  acts on the current search hit (context), using it again, after
+;;  you have used it to replace the first such match, replaces the
+;;  next one.  And so on.
 ;;
-;;  `C-S-RET' always replaces the first input match in the current
-;;  search context or, if there are no matches, then the first input
-;;  match in the next context.  This behavior has these important
-;;  consequences:
+;;  Thus, if your input matches multiple parts of a search context and
+;;  you want to replace these matches, use `C-S-RET' repeatedly.
+;;  After all of the matches in the current context have been
+;;  replaced, `C-S-RET' replaces the first match in the next context.
+;;  (There is a gotcha, however, if the replacement text matches your
+;;  input - see below.)
+;;
+;;  You can thus traverse all matches of your input, in the current
+;;  sort order (by default, the order they appear in the source being
+;;  searched), by just repeating `C-S-RET'.  At the buffer limits,
+;;  repeating `C-S-RET' wraps around.
+;;
+;;  `C-S-RET' always replaces the first input match in the
+;;  current search context or, if there are no matches, then the first
+;;  input match in the next context.  This behavior has these
+;;  important consequences:
 ;;
 ;;  * If you repeat `C-S-RET' and the previous replacement no longer
 ;;    matches your input, then `C-S-RET' moves on to the next input
@@ -1065,19 +1124,6 @@
 ;;    however, replace some matches and then skip (e.g. `C-next') to
 ;;    the next context.
 ;;
-;;  What about replacing all search hits?  Use `M-|', not `C-|'.  (And
-;;  remember that you can activate the region to limit the
-;;  search-and-replace space.)
-;;
-;;  Why not `C-|'?  `C-|' just repeats `C-S-RET' on the first of the
-;;  set of candidates, which is updated after each replacement.  The
-;;  `abcd' gotcha example above thus applies here too: If the
-;;  replacement text does not match your input, then there's no
-;;  problem.  Otherwise, the same candidate is operated on repeatedly
-;;  when you use `C-|'.  `M-|' is designed to instead take a static
-;;  snapshot of the current set of candidates, and then act once on
-;;  each of them.
-;;
 ;;  What your input matches, hence what gets replaced if
 ;;  `icicle-search-replace-whole-candidate-flag' is nil, depends on a
 ;;  few Icicles options:
@@ -1094,12 +1140,32 @@
 ;;    then your exact input match is replaced; otherwise, the ECM is
 ;;    replaced.
 ;;
-;;  Finally, the replacement string can be nearly anything that is
-;;  allowed as a replacement by `query-replace-regexp'.  In Emacs 22
-;;  or later, this includes Emacs-Lisp sexp evaluation via `\,' and
-;;  constructs such as `\#' and `\N' (back references).  You can also
-;;  use `\?', but it is not very useful - you might as well use `M-,'
-;;  instead, to change the replacement text.
+;;  The replacement string can be nearly anything that is allowed as a
+;;  replacement by `query-replace-regexp'.  In Emacs 22 or later, this
+;;  includes Emacs-Lisp sexp evaluation via `\,' and constructs such
+;;  as `\#' and `\N' (back references).  You can also use `\?', but it
+;;  is not very useful - you might as well use `M-,' instead, to
+;;  change the replacement text.
+;;
+;;  Finally, let me repeat what I said at the beginning of this page:
+;;  Icicles search-and-replace is different from what you are used to,
+;;  and there are several different ways to use it.  Experiment to get
+;;  to know how it works, and reread the description here.
+;;
+;;  It is important to understand the various user options (with their
+;;  toggle commands) and their effects.  They can radically change the
+;;  behavior of replacement.
+;;
+;;  In particular, to put Icicles search-and-replace to best advantage
+;;  you need to know what gets replaced, depending on those user
+;;  options: the whole search hit vs only input matches, an exact
+;;  input match vs the expanded common match.  Experiment with the
+;;  toggles `M-_', `C-^', `C-;', and `M-;'.  And you need to know how
+;;  repeated `C-S-RET' works vs repeated `C-S-next'.
+;;
+;;  I know it's tricky to learn.  Experimenting helps.  If something
+;;  happens that you didn't expect, reread this section and try to
+;;  understand.  Have fun.
 ;;
 ;;  See Also:
 ;;
@@ -1466,7 +1532,13 @@
 ;;  `icicle-bookmark-cmd'.)
 ;;
 ;;  * With no prefix arg or a plain prefix arg (`C-u'), `C-x r m' acts
-;;    just like `bookmark-set'.
+;;    like `icicle-bookmark-set'.  This is similar to `bookmark-set',
+;;    but if you use Bookmark+ then you can use (lax) completion,
+;;    choosing from existing bookmarks for the same buffer.  This
+;;    makes it easy to update a nearby bookmark.
+;;
+;;    The same completion enhancements are available as for bookmark
+;;    jumping - see (@> "Jumping to a Bookmark"), below.
 ;;
 ;;  * With a negative prefix arg, `C-x r m' jumps to a bookmark (with
 ;;    completion).  See (@> "Jumping to a Bookmark"), below.
@@ -2787,7 +2859,9 @@
 ;;
 ;;  `M-RET' (`icicle-candidate-read-fn-invoke') during completion
 ;;  provides a typeless object-action interaction, which is always
-;;  available.  This is similar to the action choice provided for some
+;;  available.  (You can also use `ESC RET' or `ESC C-m'.)
+;;
+;;  This is similar to the action choice provided for some
 ;;  commands by `C-S-RET', except that there is no notion of the
 ;;  current object type - you can choose from among all Emacs-Lisp
 ;;  functions.
@@ -4019,6 +4093,11 @@
 ;;  * User option `icicle-update-input-hook' is a list of functions to
 ;;    be run when minibuffer input is updated (typing or deleting).
 ;;    This is nil, by default.
+;;
+;;  * User option `icicle-no-match-hook' is a list of functions to be
+;;    run during completion (`TAB' or `S-TAB') when there are no
+;;    completion candidates that match the current input.  This is
+;;    nil, by default.
 ;;
 ;;  * Case sensitivity: The following standard user options control
 ;;    whether completion distinguishes between uppercase and lowercase
@@ -5280,13 +5359,11 @@
 ;;  This section contains some tips about completing file and
 ;;  directory names.
 ;;
-;;  * Function `icicle-dirs-last-p' is provided as a possible value
-;;    for user option `icicle-sort-comparer'.  It treats file and
-;;    directory names specially, sorting directory names after file
-;;    names; otherwise, it is the same as `icicle-case-string-less-p'.
-;;    (You can of course reach directory names before, instead of
-;;    after, file names, by cycling using `up' and `prior' instead of
-;;    `down' and `next'.)
+;;  * Functions `icicle-dirs-first-p' and `icicle-dirs-last-p' are
+;;    provided as possible values for user option
+;;    `icicle-sort-comparer'.  They treat file and directory names
+;;    specially, sorting directory names before or after file names;
+;;    otherwise, they are the same as `icicle-case-string-less-p'.
 ;;
 ;;  * User option `icicle-cycle-into-subdirs-flag' controls whether or
 ;;    not minibuffer-input cycling explores subdirectories.  By
@@ -6095,10 +6172,10 @@
 ;;    `icicle-up-directory', which navigates to the parent directory
 ;;    and completes there instead.
 ;;
-;;  * During completion of bookmark names for `icicle-bookmark',
-;;    various keys with the prefix `C-M-' are bound to commands that
-;;    narrow the available candidates to bookmarks of a specific type.
-;;    For example, `C-M-d' narrows the choices to Dired bookmarks.
+;;  * During completion of bookmark names, various keys with the
+;;    prefix `C-M-' are bound to commands that narrow the available
+;;    candidates to bookmarks of a specific type.  For example,
+;;    `C-M-d' narrows the choices to Dired bookmarks.
 ;;
 ;;  The following bindings are made for `completion-list-mode', that
 ;;  is, for buffer `*Completions*', which shows the list of candidate
@@ -7315,7 +7392,8 @@
 ;;  ** Using `icicle-explore' **
 ;;
 ;;  `icicle-explore' is a higher-order function that takes as
-;;  arguments the following functions.
+;;  arguments the following functions, in addition to accepting
+;;  the optional `completing-read' arguments.
 ;;
 ;;  * A function to build a candidates alist (COLLECTION) for
 ;;    completion.  It fills `icicle-candidates-alist' with the

@@ -7,9 +7,9 @@
 ;; Copyright (C) 1996-2009, Drew Adams, all rights reserved.
 ;; Created: Mon Feb 27 09:25:53 2006
 ;; Version: 22.0
-;; Last-Updated: Fri Apr  2 14:29:49 2010 (-0700)
+;; Last-Updated: Tue May 18 11:15:37 2010 (-0700)
 ;;           By: dradams
-;;     Update #: 11664
+;;     Update #: 11732
 ;; URL: http://www.emacswiki.org/cgi-bin/wiki/icicles-fn.el
 ;; Keywords: internal, extensions, help, abbrev, local, minibuffer,
 ;;           keys, apropos, completion, matching, regexp, command
@@ -65,8 +65,8 @@
 ;;    `icicle-delete-whitespace-from-string',
 ;;    `icicle-dired-read-shell-command',
 ;;    `icicle-dired-smart-shell-command',
-;;    `icicle-dir-prefix-wo-wildcards', `icicle-dirs-last-p',
-;;    `icicle-displayable-cand-from-saved-set',
+;;    `icicle-dir-prefix-wo-wildcards', `icicle-dirs-first-p',
+;;    `icicle-dirs-last-p', `icicle-displayable-cand-from-saved-set',
 ;;    `icicle-display-cand-from-full-cand',
 ;;    `icicle-display-completion-list', `icicle-display-Completions',
 ;;    `icicle-display-candidates-in-Completions',
@@ -292,27 +292,10 @@
 
 
 ;; Byte-compiling this file, you will likely get some error or warning
-;; messages. All of the following are benign.  They are due to
-;; differences between different versions of Emacs.
-;;
-;; Compiling in Emacs 22:
-;;
-;; Warning: `directory-sep-char' is an obsolete variable (as of Emacs 21.1); do not use it.
-;; Warning: `make-local-hook' is an obsolete function (as of Emacs 21.1); not necessary any more.
-;;
-;; Compiling in Emacs 20:
-;;
-;; The following functions are not known to be defined:
-;;     minibufferp, minibuffer-prompt-end, field-string, minibuffer-completion-contents,
-;;     display-mouse-p, propertize, delete-dups, completing-read-multiple, test-completion,
-;;     x-font-family-list, internal-lisp-face-attribute-values, fit-window-to-buffer,
-;;     minibuffer-contents-no-properties, filesets-get-fileset-from-name, filesets-init,
-;;     filesets-entry-mode, filesets-get-filelist, filesets-directory-files,
-;;     filesets-entry-get-filter-dirs-flag, filesets-filter-dir-names, puthash, file-remote-p,
-;;     delete-minibuffer-contents, substring-no-properties, redisplay
+;; messages due to differences between different versions of Emacs.
 
 
-;;; Defvars to quiet byte-compiler
+;;; Defvars to quiet the byte-compiler:
 
 (when (< emacs-major-version 22)
   (defvar completion-common-substring)
@@ -1294,8 +1277,8 @@ functions, which use zero-indexing for POSITION."
   ;; Use this as `minibuffer-default-add-function'.
   (defun icicle-minibuffer-default-add-completions ()
     "Like `old-minibuffer-default-add-completions', but respect global filters."
-    (let ((def minibuffer-default)
-          (all (all-completions "" minibuffer-completion-table minibuffer-completion-predicate t)))
+    (let ((def  minibuffer-default)
+          (all  (all-completions "" minibuffer-completion-table minibuffer-completion-predicate t)))
       (setq all  (icicle-remove-if-not (lambda (cand)
                                          (let ((case-fold-search  completion-ignore-case))
                                            (icicle-filter-wo-input cand)))
@@ -2913,6 +2896,7 @@ INPUT is a string.  Each candidate is a string."
            (setq candidates  (FM-all-fuzzy-matches input candidates))))
     (when (consp candidates)
       (setq icicle-common-match-string  (icicle-expanded-common-match input candidates)))
+    (unless candidates  (setq icicle-common-match-string  nil))
     candidates))
 
 (defun icicle-unsorted-prefix-candidates (input)
@@ -2955,6 +2939,7 @@ prefix over all candidates."
                    (try-completion input minibuffer-completion-table
                                    minibuffer-completion-predicate))))
             (setq icicle-common-match-string  (if (eq t common-prefix) input common-prefix))))
+        (unless filtered-candidates  (setq icicle-common-match-string  nil))
         filtered-candidates)
     (quit (top-level))))                ; Let `C-g' stop it.
 
@@ -3019,6 +3004,7 @@ prefix over all candidates."
                        (save-match-data (string-match "/\\.$" common-prefix))) ; Matches /., /..
               (setq common-prefix  (substring common-prefix 0 (- (length common-prefix) 2))))
             (setq icicle-common-match-string  (if (eq t common-prefix) input common-prefix))))
+        (unless filtered-candidates  (setq icicle-common-match-string  nil))
         filtered-candidates)
     (quit (top-level))))                ; Let `C-g' stop it.
  
@@ -3075,6 +3061,7 @@ input over all candidates."
           (when (and icicle-expand-input-to-common-match-flag (consp filtered-candidates))
             (setq icicle-common-match-string  (icicle-expanded-common-match input
                                                                             filtered-candidates)))
+          (unless filtered-candidates  (setq icicle-common-match-string  nil))
           filtered-candidates))         ; Return candidates.
     (quit (top-level))))                ; Let `C-g' stop it.
 
@@ -3138,6 +3125,7 @@ input over all candidates."
                                                  (icicle-expanded-common-match
                                                   input filtered-candidates)
                                                nil)))
+          (unless filtered-candidates  (setq icicle-common-match-string  nil))
           filtered-candidates))         ; Return candidates.
     (quit (top-level))))                ; Let `C-g' stop it.
 
@@ -3433,7 +3421,7 @@ Do this only if `icicle-help-in-mode-line-flag' is non-nil."
                               (consp lacarte-menu-items-alist)
                               (cdr (assoc candidate lacarte-menu-items-alist)))
                              (;; Key-completion candidate.  Get command from candidate.
-                              (boundp 'icicle-completing-keys-p)
+                              (and (boundp 'icicle-completing-keys-p) icicle-completing-keys-p)
                               (if (string= ".." candidate)
                                   "GO UP"
                                 (let ((cmd-name  (save-match-data
@@ -3633,7 +3621,10 @@ the code."
               (icicle-save-raw-input))
 
             ;; Save expanded common match as current input, unless input is a directory.
-            (unless (and (icicle-file-name-input-p)  (file-directory-p icicle-current-input))
+            ;; Use `icicle-file-directory-p'.  `file-directory-p' fails to consider "~/foo//usr/" a directory.
+            ;; $$$$$$ We could use the `icicle-file-directory-p' code with `icicle-file-name-directory'
+            ;;        instead of `icicle-file-name-directory-w-default', if that presents a problem.
+            (unless (and (icicle-file-name-input-p) (icicle-file-directory-p icicle-current-input))
               (setq icicle-current-input  common)))))
 
        ;; Save input for `C-l'.
@@ -4113,8 +4104,8 @@ MESSAGE is the confirmation message to display in the minibuffer."
 ;; $$ No longer used.
 (defun icicle-display-Completions ()
   "Display *Completions* buffer."
-  (let ((completions (all-completions "" minibuffer-completion-table minibuffer-completion-predicate
-                                      icicle-ignore-space-prefix-flag)))
+  (let ((completions  (all-completions "" minibuffer-completion-table minibuffer-completion-predicate
+                                       icicle-ignore-space-prefix-flag)))
     (when (> (length icicle-completion-candidates) icicle-incremental-completion-threshold)
       (message "Displaying completion candidates..."))
     (with-output-to-temp-buffer "*Completions*"
@@ -5115,18 +5106,20 @@ Optional arg NOMSG non-nil means don't display an error message."
 (defun icicle-unpropertize (string)
   "Remove text properties from STRING.
 If STRING is not a string, just return it (raise no error).
-If option `icicle-unpropertize-completion-result-flag' is non-nil,
- then remove all text properties.
-Otherwise:
- 1. Remove any text properties in `icicle-candidate-properties-alist'.
- 2. Remove the internal text properties added by Icicles.
-    These are the internal text properties removed here:
+If `icicle-remove-icicles-props-p' is nil, just return STRING.  This
+ is the case for some Icicles functions that need to further process
+ the completion result.
+Otherwise, if option `icicle-unpropertize-completion-result-flag' is
+ non-nil, then remove all text properties.
+Otherwise remove only Icicles internal text properties:
+ 1. any text properties in `icicle-candidate-properties-alist'.
+ 2. The following internal text properties added by Icicles:
     `display', `help-echo', `icicle-fancy-candidates',
     `icicle-keep-newline', `icicle-mode-line-help',
     `icicle-special-candidate', `icicle-user-plain-dot',
     `icicle-whole-candidate', `invisible'.
     \(Property `mouse-face' is removed by `choose-completion-string'.\)"
-  (when (stringp string)
+  (when (and (stringp string) icicle-remove-icicles-props-p) ; Do nothing if we're inhibiting removal.
     (let ((len  (length string)))
       (if icicle-unpropertize-completion-result-flag
           (set-text-properties 0 len nil string)
@@ -5368,7 +5361,7 @@ current before user input is read from the minibuffer."
                    (if (boundp 'orig-window) orig-window (selected-window)) ; Punt wo `orig-window'.
                    (dolist (cand  cands)
                      (setq icicle-saved-completion-candidate  cand)
-                     (icicle-apply-to-saved-candidate fn t))))))
+                     (icicle-apply-to-saved-candidate fn t ,type))))))
              ;; Save & restore these, so `icomplete-exhibit' on `post-command-hook' has no error.
              (minibuffer-completion-table      minibuffer-completion-table)
              (minibuffer-completion-predicate  minibuffer-completion-predicate))
@@ -5401,7 +5394,7 @@ current before user input is read from the minibuffer."
                     (let ((icicle-candidate-alt-action-fn  (icicle-alt-act-fn-for-type "function")))
                       (dolist (cand  cands)
                         (setq icicle-saved-completion-candidate  cand)
-                        (icicle-apply-to-saved-candidate action t))))))))))))
+                        (icicle-apply-to-saved-candidate action t ,type))))))))))))
 
 (defun icicle-toggle-icicle-mode-twice ()
   "Toggle Icicle mode twice."
@@ -5520,8 +5513,8 @@ Comparison is not case-sensitive."
     "Non-nil means buffer B1 mode in mode line is `string-less-p' that of B2.
 If those names are identical, then buffer names are compared.
 Comparison is not case-sensitive."
-    (let ((bm1  (icicle-upcase (symbol-name (with-current-buffer b1 (format-mode-line mode-name)))))
-          (bm2  (icicle-upcase (symbol-name (with-current-buffer b2 (format-mode-line mode-name))))))
+    (let ((bm1  (icicle-upcase (with-current-buffer b1 (format-mode-line mode-name))))
+          (bm2  (icicle-upcase (with-current-buffer b2 (format-mode-line mode-name)))))
       (if (string= bm1 bm2)  (string-lessp b1 b2)  (string-lessp bm1 bm2)))))
 
 
@@ -5544,6 +5537,22 @@ Buffers not associated with files or processes are sorted last."
                    (if (memq system-type '(ms-dos windows-nt cygwin))
                        (string-lessp (icicle-upcase fp-b1) (icicle-upcase fp-b2))
                      (string-lessp fp-b1 fp-b2))))))
+
+
+(put 'icicle-dirs-first-p 'icicle-file-name-sort-predicate t)
+;; This predicate is used for file-name completion.
+(defun icicle-dirs-first-p (s1 s2)
+  "Non-nil means S1 is a dir and S2 a file, or S1 < S2 (alphabet).
+If not doing file-name completion, then this is the same as
+`icicle-case-string-less-p'."
+  (if (icicle-file-name-input-p)
+      (let ((s1-dir-p  (icicle-file-directory-p s1))
+            (s2-dir-p  (icicle-file-directory-p s2)))
+        (if (or (and s1-dir-p s2-dir-p) ; Both or neither are directories.
+                (not (or s1-dir-p s2-dir-p)))
+            (icicle-case-string-less-p s1 s2)  ; Compare equals.
+          s1-dir-p))                 ; Directories come before files.
+    (icicle-case-string-less-p s1 s2)))
 
 
 (put 'icicle-dirs-last-p 'icicle-file-name-sort-predicate t)

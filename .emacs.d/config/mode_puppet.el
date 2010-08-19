@@ -7,5 +7,5 @@
 
 (defun ai-elisp-puppet-mode ()
   (interactive)
-  (auto-install-from-url "http://projects.puppetlabs.com/projects/puppet/repository/revisions/master/raw/ext/emacs/puppet-mode.el")
+  (auto-install-from-url "http://projects.puppetlabs.com/projects/puppet/repository/revisions/master/raw/ext/emacs/puppet-mode.el"))
 

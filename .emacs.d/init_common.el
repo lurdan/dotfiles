@@ -33,6 +33,7 @@
 (load-safe "mode_org.el")
 (load-safe "mode_woman.el")
 (load-safe "mode_text-translator.el")
+(load-safe "mode_todochiku.el")
 (load-safe "mode_twittering.el")
 ;mode_simple-hatena.el
 ;mode_howm.el
@@ -52,15 +53,10 @@
 ;(load-safe "mode_haskell.el")
 ;mode_rpm.el
 ;mode_ruby.el
-;mode_slime.el
+(load-safe "mode_slime.el")
 
 ;(load "mode-EVAL.el")
 
-;;;;;;;;;;;
-;; 自動保存
-(require 'auto-save-buffers-enhanced)
-(setq auto-save-buffers-enhanced-interval 2)
-(auto-save-buffers-enhanced t)
 
 ;;;;;;;;;;
 ;;; migemo
@@ -73,8 +69,6 @@
 ;;;;;;;;;;;;;;
 ;;; 履歴マニア
 (autoload 'kill-summary "kill-summary" nil t)
-
-(require 'minibuf-isearch)
 
 (require 'session)
 (add-hook 'after-init-hook 'session-initialize)

@@ -35,7 +35,7 @@
 (if (fboundp 'normal-top-level-add-subdirs-to-load-path)
     (let* ((my-lisp-dir "~/.emacs.d/")
            (default-directory my-lisp-dir))
-      (setq load-path (cons my-lisp-dir load-path))
+      (add-to-list 'load-path my-lisp-dir)
       (normal-top-level-add-subdirs-to-load-path)))
 
 ;; basic settings

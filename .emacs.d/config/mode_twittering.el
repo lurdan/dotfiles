@@ -1,7 +1,9 @@
 ;;; twittering-mode
+;(auto-install-from-url "http://github.com/hayamiz/twittering-mode/raw/master/twittering-mode.el")
 (autoload 'twittering-mode "twittering-mode" "" t)
 (autoload 'twittering-update-status-from-minibuffer "twittering-mode" "" t)
 
+(setq twittering-auth-method 'xauth)
 (setq twittering-username "lurdan")
 ;(setq twittering-password "")
 ;(setq twittering-proxy-server "")
@@ -11,10 +13,6 @@
 (defun twit ()
   (interactive)
   (twittering-update-status-from-minibuffer))
-
-(defun update-elisp-twittering-mode ()
-  (interactive)
-  (auto-install-from-url "http://github.com/hayamiz/twittering-mode/raw/master/twittering-mode.el"))
 
 (add-hook 'twittering-new-tweets-hook (lambda ()
   (let ((n twittering-new-tweets-count))

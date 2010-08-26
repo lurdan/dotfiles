@@ -1,0 +1,1 @@
+(setq riece-server-alist '(("osdn.debian.or.jp:6650" :service 6650 :host "osdn.debian.or.jp" :coding utf-8)))

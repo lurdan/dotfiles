@@ -39,15 +39,47 @@
       (normal-top-level-add-subdirs-to-load-path)))
 
 ;; basic settings
-(setq inhibit-startup-message t) ; 起動メッセージを表示しない
 (exec-if-bound (menu-bar-mode -1)) ; メニューバーを消す
 (exec-if-bound (tool-bar-mode 0)) ; ツールバーを消す
-(setq gc-cons-threshold 524880) ; GCの間隔(を大きくして反応を良さげに)
-(setq frame-title-format "%b") ; タイトルバーにファイル名を表示
+;(exec-if-bound (scroll-bar-mode -1)) ; スクロールバーを消す
 (auto-compression-mode t) ; edit gz files
-(setq kill-read-only-ok t) ; surpress errors when killing read only buffers
+(setq
+ inhibit-startup-message t ; 起動メッセージを表示しない
+ gc-cons-threshold (* 10 gc-cons-threshold) ; GCの間隔(を大きくして反応を良さげに)
+ frame-title-format "%b" ; タイトルバーにファイル名を表示
+ kill-read-only-ok t ; surpress errors when killing read only buffers
+ message-log-max 10000 ; ログの記録行数
+ history-length 1000 ; 履歴をたくさん保存する
+ echo-keystrokes 0.1 ; エコーエリアにキーストロークを早く表示する
+ enable-recursive-miniburffers t ; ミニバファを再帰的に呼び出せるようにする
+ large-file-warning-threshold (* 25 1024 1024) ; 大きいファイルを開こうとした場合に警告。サイズ閾値 25MB。
+ )
+
 (setq-default indent-tabs-mode nil) ; avoid using tab to aligning
+(setq-default save-place t) ; ファイル内のカーソル位置を記憶する
+(require 'saveplace)
+
 (windmove-default-keybindings) ; shift + cursor to move to other window
+(savehist-mode 1) ; 履歴を保存する
+
+;(global-hl-line-mode 1) ;現在行に色をつける
+;(set-face-background 'hl-line "darkolivegreen") ;現在行につける色
+
+(transient-mark-mode 1) ; リージョンに色をつける
+
+;(show-paren-mode 1)
+
+(setq use-dialog-box nil) ; ダイアログボックスを使わないようにする
+(defalias 'message-box 'message)
+
+(defalias 'yes-or-no-p 'y-or-n-p) ; yes と入力するのは面倒なので y で十分にする
+
+(ffap-bindings) ; 現在位置のファイル・URL を開く
+
+;; ファイル名がかぶった場合にバッファ名をわかりやすくする
+(require 'uniquify)
+(setq uniquify-buffer-name-style 'post-forward-angle-brackets)
+(setq uniquify-ignore-buffers-re "*[^*]+*")
 
 ;; カーソル位置の表示
 (line-number-mode t)
@@ -59,7 +91,28 @@
 
 ;;; iswitchb
 (require 'iswitchb)
+(iswitchb-mode 1)
 (iswitchb-default-keybindings)
+(setq read-buffer-function 'iswitchb-read-buffer)
+(setq iswitchb-regexp nil) ; 部分文字列のかわりに正規表現を使う場合は t
+(setq iswitchb-prompt-newbuffer nil)
+
+;(ido-mode 1)
+;(ido-everywhere 1)
+
+(cua-mode t)
+(setq cua-enable-cua-keys nil)
+
+; bookmark. C-x r m to set, C-x r l to jump
+(setq bookmark-save-flag 1)
+(progn
+  (setq bookmark-sort-flag nil)
+  (defun bookmark-arrange-latest-top ()
+    (let ((latest (bookmark-get-bookmark bookmark)))
+      (setq bookmark-alist (cons latest (delq latest bookmark-alist))))
+    (bookmark-save))
+  (add-hook 'bookmark-after-jump-hook 'bookmark-arrange-latest-top))
+
 
 ;; chmod +x for shebang
 (add-hook

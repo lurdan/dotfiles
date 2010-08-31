@@ -14,4 +14,4 @@ auto-save-list
 *.sw[po]
 tags
 ._*
-
+.emacs.d/auto-install/*

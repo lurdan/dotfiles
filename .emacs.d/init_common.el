@@ -3,6 +3,7 @@
 
 ;;
 (load-safe "mode_auto-install.el")
+(load-safe "mode_auto-async-byte-compile.el")
 
 ;; settings for various completions
 (load-safe "mode_anything.el")
@@ -56,6 +57,15 @@
 (load-safe "mode_slime.el")
 
 ;(load "mode-EVAL.el")
+
+
+;(load-safe "mode_sticky.el")
+;(load-safe "mode_recentf-ext.el")
+;(load-safe "mode_sense-region.el")
+
+
+
+
 
 
 ;;;;;;;;;;

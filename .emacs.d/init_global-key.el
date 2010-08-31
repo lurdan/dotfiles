@@ -1,12 +1,14 @@
 ;;; keybind settings
 ;; auto indent
-(global-set-key "\C-m" 'newline-and-indent)
-(global-set-key "\C-j" 'newline)
+;(global-set-key "\C-m" 'newline-and-indent)
+;(global-set-key "\C-j" 'newline)
 
 ;(global-set-key [?\C-:] 'anything)
 
-(global-set-key "\C-x\M-t" 'text-translator)
+;(global-set-key "\C-x\M-t" 'text-translator)
 ;(global-set-key "\C-x\M-T" 'text-translator-translate-last-string)
+
+(global-set-key (kbd "C-h") 'delete-backward-char)
 
 
 ;; キーバインドを定義するマイナーモード

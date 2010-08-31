@@ -100,6 +100,12 @@
 ;(ido-mode 1)
 ;(ido-everywhere 1)
 
+; shell-mode
+(add-hook 'shell-mode-hook 'ansi-color-for-comint-mode-on)
+(add-hook 'comint-output-filter-functions 'comint-watch-for-password-prompt)
+; for zsh
+; [[ $EMACS = t ]] && unsetopt zle
+
 (cua-mode t)
 (setq cua-enable-cua-keys nil)
 

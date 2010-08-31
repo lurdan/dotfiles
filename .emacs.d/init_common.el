@@ -62,6 +62,8 @@
 ;(load-safe "mode_sticky.el")
 ;(load-safe "mode_recentf-ext.el")
 ;(load-safe "mode_sense-region.el")
+;(load-safe "mode_multi-shell.el")
+;(load-safe "mode_shell-history.el")
 
 
 

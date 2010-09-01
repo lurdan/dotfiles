@@ -13,6 +13,12 @@
   `(add-hook ,hookname
              (function (lambda () ,@sexplist))))
 
+(defmacro eval-safe (&rest body)
+  ""
+  `(condition-case error
+       (progn ,@body)
+     (error (message "[eval-safe] %s" err))))
+
 (defun load-safe (loadlib)
   ""
   (let ((load-status (load loadlib t)))
@@ -25,12 +31,6 @@
   (and (locate-library file)
        (autoload function file docstring interactive type)))
 
-(defmacro eval-safe (&rest body)
-  ""
-  `(condition-case error
-       (progn ,@body)
-     (error (message "[eval-safe] %s" err))))
-
 ;; load-path にサブディレクトリごと追加
 (if (fboundp 'normal-top-level-add-subdirs-to-load-path)
     (let* ((my-lisp-dir "~/.emacs.d/")
@@ -41,7 +41,7 @@
 ;; basic settings
 (exec-if-bound (menu-bar-mode -1)) ; メニューバーを消す
 (exec-if-bound (tool-bar-mode 0)) ; ツールバーを消す
-;(exec-if-bound (scroll-bar-mode -1)) ; スクロールバーを消す
+(exec-if-bound (scroll-bar-mode -1)) ; スクロールバーを消す
 (auto-compression-mode t) ; edit gz files
 (setq
  inhibit-startup-message t ; 起動メッセージを表示しない
@@ -50,7 +50,7 @@
  kill-read-only-ok t ; surpress errors when killing read only buffers
  message-log-max 10000 ; ログの記録行数
  history-length 1000 ; 履歴をたくさん保存する
- echo-keystrokes 0.1 ; エコーエリアにキーストロークを早く表示する
+ echo-keystrokes 0.8 ; エコーエリアにキーストロークを表示するまでの時間 (default 0 なら表示しない)
  enable-recursive-miniburffers t ; ミニバファを再帰的に呼び出せるようにする
  large-file-warning-threshold (* 25 1024 1024) ; 大きいファイルを開こうとした場合に警告。サイズ閾値 25MB。
  )
@@ -67,7 +67,7 @@
 
 (transient-mark-mode 1) ; リージョンに色をつける
 
-;(show-paren-mode 1)
+(show-paren-mode 1)
 
 (setq use-dialog-box nil) ; ダイアログボックスを使わないようにする
 (defalias 'message-box 'message)
@@ -75,6 +75,7 @@
 (defalias 'yes-or-no-p 'y-or-n-p) ; yes と入力するのは面倒なので y で十分にする
 
 (ffap-bindings) ; 現在位置のファイル・URL を開く
+(setq diff-switches "-u")
 
 ;; ファイル名がかぶった場合にバッファ名をわかりやすくする
 (require 'uniquify)
@@ -97,8 +98,8 @@
 (setq iswitchb-regexp nil) ; 部分文字列のかわりに正規表現を使う場合は t
 (setq iswitchb-prompt-newbuffer nil)
 
-;(ido-mode 1)
-;(ido-everywhere 1)
+(ido-mode 1)
+(exec-if-bound (ido-everywhere 1))
 
 ; shell-mode
 (add-hook 'shell-mode-hook 'ansi-color-for-comint-mode-on)

@@ -23,7 +23,7 @@
 (load-safe "mode_browse-kill-ring.el")
 (load-safe "mode_elscreen.el")
 ;(load-safe "mode_dired.el")
-;(load-safe "mode_muse.el")
+(load-safe "mode_muse.el")
 ;mode_html-helper.el
 ;mode_parenthesis.el
 
@@ -36,8 +36,8 @@
 (load-safe "mode_text-translator.el")
 (load-safe "mode_todochiku.el")
 (load-safe "mode_twittering.el")
-;mode_simple-hatena.el
-;mode_howm.el
+(load-safe "mode_simple-hatena.el")
+;(load-safe "mode_howm.el")
 ;mode_wanderlust.el
 ;mode_dvc.el
 
@@ -60,14 +60,10 @@
 
 
 ;(load-safe "mode_sticky.el")
-;(load-safe "mode_recentf-ext.el")
-;(load-safe "mode_sense-region.el")
-;(load-safe "mode_multi-shell.el")
-;(load-safe "mode_shell-history.el")
-
-
-
-
+(load-safe "mode_recentf-ext.el")
+(load-safe "mode_sense-region.el")
+(load-safe "mode_multi-shell.el")
+(load-safe "mode_shell-history.el")
 
 
 ;;;;;;;;;;

@@ -21,9 +21,6 @@ myManageHook = composeAll [
     , className =? "pidgin" --> doFloat
                ]
 
-defaultGaps::[(Int,Int,Int,Int)]
-defaultGaps = [(16,0,0,0)]
-
 main = do
   xmproc <- spawnPipe "/usr/bin/xmobar ~/.xmonad/xmobar"
   xmonad $ defaultConfig

@@ -47,18 +47,21 @@
 (require 'xml)
 (require 'parse-time)
 (when (> 22 emacs-major-version)
-  (add-to-list 'load-path
-	       (expand-file-name
-               "url-emacs21" (if load-file-name
-                                 (or (file-name-directory load-file-name)
-                                     ".")
-                               ".")))
+  (setq load-path
+	(append (mapcar (lambda (dir)
+			  (expand-file-name
+			   dir
+			   (if load-file-name
+			       (or (file-name-directory load-file-name)
+				   ".")
+			     ".")))
+			'("url-emacs21" "emacs21"))
+		load-path))
   (and (require 'un-define nil t)
        ;; the explicitly require 'unicode to update a workaround with
        ;; navi2ch. see a comment of `twittering-ucs-to-char' for more
        ;; details.
-       (require 'unicode nil t))
-  (set-terminal-coding-system 'utf-8))
+       (require 'unicode nil t)))
 (require 'url)
 
 (defconst twittering-mode-version "HEAD")
@@ -66,6 +69,12 @@
 (defvar twittering-api-host "api.twitter.com")
 (defvar twittering-api-search-host "search.twitter.com")
 (defvar twittering-web-host "twitter.com")
+(defvar twittering-oauth-request-token-url-without-scheme
+  "://api.twitter.com/oauth/request_token")
+(defvar twittering-oauth-authorization-url-base-without-scheme
+  "://api.twitter.com/oauth/authorize?oauth_token=")
+(defvar twittering-oauth-access-token-url-without-scheme
+  "://api.twitter.com/oauth/access_token")
 
 (defun twittering-mode-version ()
   "Display a message for twittering-mode version."
@@ -75,6 +84,22 @@
     (if (interactive-p)
 	(message "%s" version-string)
       version-string)))
+
+(defvar twittering-auth-method 'oauth
+  "*Authentication method for `twittering-mode'.
+The symbol `basic' means Basic Authentication. The symbol `oauth' means
+OAuth Authentication. The symbol `xauth' means xAuth Authentication.
+OAuth Authentication requires `twittering-oauth-consumer-key' and
+`twittering-oauth-consumer-secret'. Additionally, it requires an external
+command `curl' or another command included in `tls-program', which may be
+`openssl' or `gnutls-cli', for SSL.")
+
+(defvar twittering-oauth-use-ssl t
+  "*Whether to use SSL on authentication via OAuth. Twitter requires SSL
+on authorization via OAuth.")
+(defvar twittering-oauth-consumer-key nil)
+(defvar twittering-oauth-consumer-secret nil)
+(defvar twittering-oauth-access-token-alist nil)
 
 (defconst twittering-max-number-of-tweets-on-retrieval 200
   "The maximum number of `twittering-number-of-tweets-on-retrieval'.")
@@ -92,6 +117,8 @@ The upper limit is `twittering-max-number-of-tweets-on-retrieval'.")
   "Alist of tinyfy services.")
 
 (defvar twittering-mode-map (make-sparse-keymap))
+(defvar twittering-mode-menu-on-uri-map (make-sparse-keymap "Twittering Mode"))
+(defvar twittering-mode-on-uri-map (make-sparse-keymap))
 
 (defvar twittering-tweet-history nil)
 (defvar twittering-user-history nil)
@@ -120,19 +147,22 @@ DO NOT SET VALUE MANUALLY.")
   "The interval of auto redisplaying statuses.")
 
 (defvar twittering-username nil
-  "An username of your Twitter account.")
-(defvar twittering-username-active nil
-  "Copy of `twittering-username' for internal use.")
+  "*An username of your Twitter account.")
 
 (defvar twittering-password nil
-  "A password of your Twitter account. Leave it blank is the
+  "*A password of your Twitter account. Leave it blank is the
 recommended way because writing a password in .emacs file is so
 dangerous.")
-(defvar twittering-password-active nil
-  "Copy of `twittering-password' for internal use.")
 
 (defvar twittering-initial-timeline-spec-string ":home"
-  "The initial timeline spec string.")
+  "*The initial timeline spec string. If the value of the variable is a
+list of timeline spec strings, the timelines are rendered on their own
+buffers.")
+
+(defvar twittering-timeline-spec nil
+  "The timeline spec for the current buffer.")
+(defvar twittering-timeline-spec-string ""
+  "The timeline spec string for the current buffer.")
 
 (defvar twittering-timeline-spec-alias nil
   "*Alist for aliases of timeline spec.
@@ -140,22 +170,22 @@ Each element is (NAME . SPEC-STRING), where NAME is a string and
 SPEC-STRING is a string or a function that returns a timeline spec string.
 
 The alias can be referred as \"$NAME\" or \"$NAME(ARG)\" in timeline spec
-string. If SPEC-STRING is a string, ARG is simly ignored.
+string. If SPEC-STRING is a string, ARG is simply ignored.
 If SPEC-STRING is a function, it is called with a string argument.
 For the style \"$NAME\", the function is called with nil.
 For the style \"$NAME(ARG)\", the function is called with a string ARG.
 
 For example, if you specify
- '((\"FRIENDS\" . \"(USER1+USER2+USER3)\")
-   (\"to_me\" . \"(:mentions+:retweets_of_me+:direct_messages)\")
+ `((\"FRIENDS\" . \"my-account/friends-list\")
    (\"related-to\" .
             ,(lambda (username)
                (if username
                    (format \":search/to:%s OR from:%s OR @%s/\"
                            username username username)
                  \":home\")))),
-then you can use \"$to_me\" as
-\"(:mentions+:retweets_of_me+:direct_messages)\".")
+then you can use \"$FRIENDS\" and \"$related-to(USER)\" as
+\"my-account/friends-list\" and \":search/to:USER OR from:USER OR @USER/\",
+respectively.")
 
 (defvar twittering-current-timeline-spec-string nil
   "The current timeline spec string. This variable should not be referred
@@ -174,6 +204,9 @@ directly. Use `twittering-current-timeline-spec-string' or
 (defvar twittering-new-tweets-spec nil
   "Timeline spec, which new tweets belong to, when
 `twittering-new-tweets-hook' is run.")
+(defvar twittering-new-tweets-statuses nil
+  "New tweet status messages, when
+`twittering-new-tweets-hook' is run.")
 
 (defvar twittering-new-tweets-hook nil
   "*Hook run when new tweets are received.
@@ -181,6 +214,11 @@ directly. Use `twittering-current-timeline-spec-string' or
 You can read `twittering-new-tweets-count' or `twittering-new-tweets-spec'
 to get the number of new tweets received when this hook is run.")
 
+(defvar twittering-active-mode nil
+  "Non-nil if new statuses should be retrieved periodically.
+Do not modify this variable directly. Use `twittering-activate-buffer',
+`twittering-deactivate-buffer', `twittering-toggle-activate-buffer' or
+`twittering-set-active-flag-for-buffer'.")
 (defvar twittering-scroll-mode nil)
 
 (defvar twittering-jojo-mode nil)
@@ -188,7 +226,7 @@ to get the number of new tweets received when this hook is run.")
   "*Non-nil means tweets are aligned in reverse order of `http://twitter.com/'.")
 (defvar twittering-display-remaining nil
   "*If non-nil, display remaining of rate limit on the mode line.")
-(defvar twittering-status-format "%i %s,  %@:\n%FILL{  %T // from %f%L%r%R}\n "
+(defvar twittering-status-format "%i %s,  %@:\n%FILL[  ]{%T // from %f%L%r%R}\n "
   "Format string for rendering statuses.
 Ex. \"%i %s,  %@:\\n%FILL{  %T // from %f%L%r%R}\n \"
 
@@ -212,8 +250,11 @@ Items:
  %t - text filled as one paragraph
  %' - truncated
  %FACE[face-name]{...} - strings decorated with the specified face.
- %FILL{...} - strings filled as a paragrah.
-              You can use any other specifiers in braces.
+ %FILL[prefix]{...} - strings filled as a paragraph. The prefix is optional.
+                      You can use any other specifiers in braces.
+ %FOLD[prefix]{...} - strings folded within the frame width.
+                      The prefix is optional. This keeps newlines.
+                      You can use any other specifiers in braces.
  %f - source
  %# - id
 ")
@@ -256,21 +297,47 @@ when it conflict with your input method (such as AquaSKK, etc.)")
   "Use SSL connection if this variable is non-nil.
 
 SSL connections use 'curl' command as a backend.")
+(defvar twittering-allow-insecure-server-cert nil
+  "*If non-nil, twittering-mode allows insecure server certificates.")
 
 (defvar twittering-curl-program nil
   "Cache a result of `twittering-find-curl-program'.
 DO NOT SET VALUE MANUALLY.")
+(defvar twittering-curl-program-https-capability nil
+  "Cache a result of `twittering-start-http-session-curl-https-p'.
+DO NOT SET VALUE MANUALLY.")
 
-(defvar twittering-connection-type-order '(curl native))
+(defvar twittering-wget-program nil
+  "Cache a result of `twittering-find-wget-program'.
+DO NOT SET VALUE MANUALLY.")
+
+(defvar twittering-tls-program nil
+  "*List of strings containing commands to start TLS stream to a host.
+Each entry in the list is tried until a connection is successful.
+%h is replaced with server hostname, %p with port to connect to.
+Also see `tls-program'.
+If nil, this is initialized with a list of valied entries extracted from
+`tls-program'.")
+
+(defvar twittering-connection-type-order '(curl wget native))
   "*A list of connection methods in the preferred order."
 
 (defvar twittering-connection-type-table
   '((native (check . t)
-	    (https . nil)
-	    (start . twittering-start-http-session-native))
+	    (https . twittering-start-http-session-native-tls-p)
+	    (send-http-request . twittering-send-http-request-native)
+	    (oauth-get-token . native)
+	    (pre-process-buffer . twittering-pre-process-buffer-native))
     (curl (check . twittering-start-http-session-curl-p)
 	  (https . twittering-start-http-session-curl-https-p)
-	  (start . twittering-start-http-session-curl)))
+	  (send-http-request . twittering-send-http-request-curl)
+	  (oauth-get-token . curl)
+	  (pre-process-buffer . twittering-pre-process-buffer-curl))
+    (wget (check . twittering-start-http-session-wget-p)
+	  (https . t)
+	  (send-http-request . twittering-send-http-request-wget)
+	  (oauth-get-token . wget)
+	  (pre-process-buffer . twittering-pre-process-buffer-wget)))
   "A list of alist of connection methods.")
 
 (defvar twittering-format-status-function-source ""
@@ -288,7 +355,7 @@ DO NOT SET VALUE MANUALLY.")
   "Post retweets using native retweets if this variable is non-nil.")
 
 (defvar twittering-update-status-function
-  'twittering-update-status-from-minibuffer
+  'twittering-update-status-from-pop-up-buffer
   "The function used to posting a tweet. It takes two arguments:
 the first argument INIT-STR is initial text to be edited and the
 second argument REPLY-TO-ID is a user ID of a tweet to which you
@@ -298,25 +365,362 @@ Twittering-mode provides two functions for updating status:
 * `twittering-update-status-from-minibuffer': edit tweets in minibuffer
 * `twittering-update-status-from-pop-up-buffer': edit tweets in pop-up buffer")
 
+(defvar twittering-request-confirmation-on-posting nil
+  "*If *non-nil*, confirmation will be requested on posting a tweet edited in
+pop-up buffer.")
+
+(defvar twittering-use-master-password nil
+  "*Wheter to store private information encrypted with a master password.")
+(defvar twittering-private-info-file
+  (expand-file-name "~/.twittering-mode.gpg")
+  "*File for storing encrypted private information when
+`twittering-use-master-password' is non-nil.")
+(defvar twittering-variables-stored-with-encryption
+  '(twittering-oauth-access-token-alist))
+
+(defvar twittering-api-prefix "1/")
+(defvar twittering-search-api-method "search")
+(defvar twittering-web-path-prefix "")
+
+(defvar twittering-service-method 'twitter
+  "*Service method for `twittering-mode'.
+The symbol `twitter' means Twitter Service. The symbol `statusnet' means
+StatusNet Service.")
+
+(defvar twittering-service-method-table
+  '((twitter (status-url . twittering-get-status-url-twitter)
+	     (search-url . twittering-get-search-url-twitter))
+    (statusnet (status-url . twittering-get-status-url-statusnet)
+	       (search-url . twittering-get-search-url-statusnet)))
+  "A list of alist of service methods.")
+
+;;;
+;;; Abstract layer for Twitter API
+;;;
+
+(defun twittering-api-path (&rest params)
+  (mapconcat 'identity `(,twittering-api-prefix ,@params) ""))
+
+(defun twittering-call-api (command args-alist &optional noninteractive)
+  "Call Twitter API and return the process object for the request."
+  (cond
+   ((eq command 'retrieve-timeline)
+    ;; Retrieve a timeline.
+    (let* ((spec (cdr (assq 'timeline-spec args-alist)))
+	   (spec-string (cdr (assq 'timeline-spec-string args-alist)))
+	   (spec-type (car-safe spec))
+	   (number (cdr (assq 'number args-alist)))
+	   (number-str (number-to-string number))
+	   (max_id (cdr (assq 'max_id args-alist)))
+	   (since_id (cdr (assq 'since_id args-alist)))
+	   (word (cdr (assq 'word args-alist)))
+	   (parameters
+	    `(,@(when max_id `(("max_id" . ,max_id)))
+	      ,@(when since_id `(("since_id" . ,since_id)))
+	      ,@(cond
+		 ((eq spec-type 'search)
+		  `(("q" . ,word)
+		    ("rpp" . ,number-str)))
+		 ((eq spec-type 'list)
+		  `(("per_page" . ,number-str)))
+		 ((memq spec-type '(user friends mentions public))
+		  `(("count" . ,number-str)
+		    ("include_rts" . "true")))
+		 (t
+		  `(("count" . ,number-str))))))
+	   (format (if (eq spec-type 'search)
+		       "atom"
+		     "xml"))
+	   (simple-spec-list
+	    '((direct_messages . "direct_messages")
+	      (direct_messages_sent . "direct_messages/sent")
+	      (friends . "statuses/friends_timeline")
+	      (home . "statuses/home_timeline")
+	      (mentions . "statuses/mentions")
+	      (public . "statuses/public_timeline")
+	      (replies . "statuses/replies")
+	      (retweeted_by_me . "statuses/retweeted_by_me")
+	      (retweeted_to_me . "statuses/retweeted_to_me")
+	      (retweets_of_me . "statuses/retweets_of_me")))
+	   (host (cond ((eq spec-type 'search) twittering-api-search-host)
+		       (t twittering-api-host)))
+	   (method
+	    (cond
+	     ((eq spec-type 'user)
+	      (let ((username (elt spec 1)))
+		(twittering-api-path "statuses/user_timeline/" username)))
+	     ((eq spec-type 'list)
+	      (let ((username (elt spec 1))
+		    (list-name (elt spec 2)))
+		(twittering-api-path username "/lists/" list-name "/statuses")))
+	     ((eq spec-type 'search)
+	      twittering-search-api-method)
+	     ((assq spec-type simple-spec-list)
+	      (twittering-api-path (cdr (assq spec-type simple-spec-list))))
+	     (t nil))))
+      (if (and host method)
+	  (twittering-http-get host method noninteractive parameters format)
+	(error "Invalid timeline spec"))))
+   ((eq command 'get-list-index)
+    ;; Get list names.
+    (let ((username (cdr (assq 'username args-alist)))
+	  (sentinel (cdr (assq 'sentinel args-alist)))
+	  (clean-up-sentinel (cdr (assq 'clean-up-sentinel args-alist))))
+      (twittering-http-get twittering-api-host
+			   (twittering-api-path username "/lists")
+			   noninteractive nil nil sentinel clean-up-sentinel)))
+   ((eq command 'create-friendships)
+    ;; Create a friendship.
+    (let ((username (cdr (assq 'username args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "friendships/create")
+			    `(("screen_name" . ,username)))))
+   ((eq command 'destroy-friendships)
+    ;; Destroy a friendship
+    (let ((username (cdr (assq 'username args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "friendships/destroy")
+			    `(("screen_name" . ,username)))))
+   ((eq command 'create-favorites)
+    ;; Create a favorite.
+    (let ((id (cdr (assq 'id args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "favorites/create/" id))))
+   ((eq command 'destroy-favorites)
+    ;; Destroy a favorite.
+    (let ((id (cdr (assq 'id args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "favorites/destroy/" id))))
+   ((eq command 'update-status)
+    ;; Post a tweet.
+    (let* ((status (cdr (assq 'status args-alist)))
+	   (id (cdr (assq 'in-reply-to-status-id args-alist)))
+	   (parameters
+	    `(("status" . ,status)
+	      ,@(when (eq twittering-auth-method 'basic)
+		  '(("source" . "twmode")))
+	      ,@(when id `(("in_reply_to_status_id" . ,id))))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "statuses/update")
+			    parameters)))
+   ((eq command 'destroy-status)
+    ;; Destroy a status.
+    (let ((id (cdr (assq 'id args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "statuses/destroy/" id))))
+   ((eq command 'retweet)
+    ;; Post a retweet.
+    (let ((id (cdr (assq 'id args-alist))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "statuses/retweet/" id))))
+   ((eq command 'verify-credentials)
+    ;; Verify the account.
+    (let ((sentinel (cdr (assq 'sentinel args-alist)))
+	  (clean-up-sentinel (cdr (assq 'clean-up-sentinel args-alist))))
+      (twittering-http-get twittering-api-host
+			   (twittering-api-path "account/verify_credentials")
+			   noninteractive nil nil
+			   sentinel clean-up-sentinel)))
+   ((eq command 'send-direct-message)
+    ;; Send a direct message.
+    (let ((parameters
+	   `(("screen_name" . ,(cdr (assq 'username args-alist)))
+	     ("text" . ,(cdr (assq 'status args-alist))))))
+      (twittering-http-post twittering-api-host
+			    (twittering-api-path "direct_messages/new")
+			    parameters)))
+   (t
+    nil)))
+
 ;;;
 ;;; Proxy setting / functions
 ;;;
 
 (defvar twittering-proxy-use nil)
-(defvar twittering-proxy-keep-alive nil)
 (defvar twittering-proxy-server nil
-  "*The proxy server for `twittering-mode'.
-If nil, it is initialized on entering `twittering-mode'.
-The port number is specified by `twittering-proxy-port'.")
+  "*Proxy server for `twittering-mode'.
+If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.
+
+To use individual proxies for HTTP and HTTPS, both `twittering-proxy-server'
+and `twittering-proxy-port' must be nil.")
 (defvar twittering-proxy-port nil
-  "*The port number of a proxy server for `twittering-mode'.
+  "*Port number for `twittering-mode'.
+If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.
+
+To use individual proxies for HTTP and HTTPS, both `twittering-proxy-server'
+and `twittering-proxy-port' must be nil.")
+(defvar twittering-proxy-keep-alive nil)
+(defvar twittering-proxy-user nil
+  "*Username for `twittering-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-proxy-password nil
+  "*Password for `twittering-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+
+(defvar twittering-http-proxy-server nil
+  "*HTTP proxy server for `twittering-mode'.
 If nil, it is initialized on entering `twittering-mode'.
-The server is specified by `twittering-proxy-server'.")
-(defvar twittering-proxy-user nil)
-(defvar twittering-proxy-password nil)
+The port number is specified by `twittering-http-proxy-port'.
+For HTTPS connection, the proxy specified by `twittering-https-proxy-server'
+and `twittering-https-proxy-port' is used.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-http-proxy-port nil
+  "*Port number of a HTTP proxy server for `twittering-mode'.
+If nil, it is initialized on entering `twittering-mode'.
+The server is specified by `twittering-http-proxy-server'.
+For HTTPS connection, the proxy specified by `twittering-https-proxy-server'
+and `twittering-https-proxy-port' is used.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-http-proxy-keep-alive nil
+  "*If non-nil, the Keep-alive is enabled. This is experimental.")
+(defvar twittering-http-proxy-user nil
+  "*Username for `twittering-http-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-http-proxy-password nil
+  "*Password for `twittering-http-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+
+(defvar twittering-https-proxy-server nil
+  "*HTTPS proxy server for `twittering-mode'.
+If nil, it is initialized on entering `twittering-mode'.
+The port number is specified by `twittering-https-proxy-port'.
+For HTTP connection, the proxy specified by `twittering-http-proxy-server'
+and `twittering-http-proxy-port' is used.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-https-proxy-port nil
+  "*Port number of a HTTPS proxy server for `twittering-mode'.
+If nil, it is initialized on entering `twittering-mode'.
+The server is specified by `twittering-https-proxy-server'.
+For HTTP connection, the proxy specified by `twittering-http-proxy-server'
+and `twittering-http-proxy-port' is used.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-https-proxy-keep-alive nil
+  "*If non-nil, the Keep-alive is enabled. This is experimental.")
+(defvar twittering-https-proxy-user nil
+  "*Username for `twittering-https-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+(defvar twittering-https-proxy-password nil
+  "*Password for `twittering-https-proxy-server'.
+
+NOTE: If both `twittering-proxy-server' and `twittering-proxy-port' are
+non-nil, the variables `twittering-proxy-*' have priority over other
+variables `twittering-http-proxy-*' or `twittering-https-proxy-*'
+regardless of HTTP or HTTPS.")
+
+(defun twittering-normalize-proxy-vars ()
+  "Normalize the type of `twittering-http-proxy-port' and
+`twittering-https-proxy-port'."
+  (mapc (lambda (sym)
+	  (let ((value (symbol-value sym)))
+	    (cond
+	     ((null value)
+	      nil)
+	     ((integerp value)
+	      nil)
+	     ((stringp value)
+	      (set sym (string-to-number value)))
+	     (t
+	      (set sym nil)))))
+	'(twittering-proxy-port
+	  twittering-http-proxy-port
+	  twittering-https-proxy-port)))
+
+(defun twittering-proxy-info (scheme &optional item)
+  "Return an alist for proxy configuration registered for SCHEME.
+SCHEME must be a string \"http\", \"https\" or a symbol 'http or 'https.
+The server name is a string and the port number is an integer."
+  (twittering-normalize-proxy-vars)
+  (let ((scheme (if (symbolp scheme)
+		    (symbol-name scheme)
+		  scheme))
+	(info-list
+	 `((("http" "https")
+	    . ((server . ,twittering-proxy-server)
+	       (port . ,twittering-proxy-port)
+	       (keep-alive . ,twittering-proxy-keep-alive)
+	       (user . ,twittering-proxy-user)
+	       (password . ,twittering-proxy-password)))
+	   (("http")
+	    . ((server . ,twittering-http-proxy-server)
+	       (port . ,twittering-http-proxy-port)
+	       (keep-alive . ,twittering-http-proxy-keep-alive)
+	       (user . ,twittering-http-proxy-user)
+	       (password . ,twittering-http-proxy-password)))
+	   (("https")
+	    . ((server . ,twittering-https-proxy-server)
+	       (port . ,twittering-https-proxy-port)
+	       (keep-alive . ,twittering-https-proxy-keep-alive)
+	       (user . ,twittering-https-proxy-user)
+	       (password . ,twittering-https-proxy-password))))))
+    (let ((info
+	   (car (remove nil
+			(mapcar
+			 (lambda (entry)
+			   (when (member scheme (car entry))
+			     (let ((info (cdr entry)))
+			       (when (and (cdr (assq 'server info))
+					  (cdr (assq 'port info)))
+				 info))))
+			 info-list)))))
+      (if item
+	  (cdr (assq item info))
+	info))))
+
+(defun twittering-url-proxy-services ()
+  "Return the current proxy configuration for `twittering-mode' in the format
+of `url-proxy-services'."
+  (remove nil (mapcar
+	       (lambda (scheme)
+		 (let ((server (twittering-proxy-info scheme 'server))
+		       (port (twittering-proxy-info scheme 'port)))
+		   (when (and server port)
+		     `(,scheme . ,(format "%s:%s" server port)))))
+	       '("http" "https"))))
 
 (defun twittering-find-proxy (scheme)
-  "Find proxy server and its port for `twittering-mode' and returns
+  "Find proxy server and its port from the environmental variables and return
 a cons pair of them.
 SCHEME must be \"http\" or \"https\"."
   (cond
@@ -354,18 +758,19 @@ SCHEME must be \"http\" or \"https\"."
     ;; `url-scheme-get-property' before calling such functions.
     (url-scheme-get-property "http" 'name)
     (url-scheme-get-property "https" 'name))
-  (unless (and twittering-proxy-server twittering-proxy-port)
-    (let ((proxy-info (or (if twittering-use-ssl
-			      (twittering-find-proxy "https"))
-			  (twittering-find-proxy "http"))))
-      (when proxy-info
-	(let ((host (car proxy-info))
-	      (port (cdr proxy-info)))
-	  (setq twittering-proxy-server host)
-	  (setq twittering-proxy-port port)))))
+  (unless (and twittering-http-proxy-server
+	       twittering-http-proxy-port)
+    (let ((info (twittering-find-proxy "http")))
+      (setq twittering-http-proxy-server (car-safe info))
+      (setq twittering-http-proxy-port (cdr-safe info))))
+  (unless (and twittering-https-proxy-server
+	       twittering-https-proxy-port)
+    (let ((info (twittering-find-proxy "https")))
+      (setq twittering-https-proxy-server (car-safe info))
+      (setq twittering-https-proxy-port (cdr-safe info))))
   (if (and twittering-proxy-use
-	   (null twittering-proxy-server)
-	   (null twittering-proxy-port))
+	   (null (twittering-proxy-info "http"))
+	   (null (twittering-proxy-info "https")))
       (progn
 	(message "Disabling proxy due to lack of configuration.")
 	(setq twittering-proxy-use nil))
@@ -378,6 +783,674 @@ SCHEME must be \"http\" or \"https\"."
   (if (twittering-setup-proxy)
       (message (if twittering-proxy-use "Use Proxy:on" "Use Proxy:off")))
   (twittering-update-mode-line))
+
+;;;
+;;; OAuth
+;;;
+
+(defvar twittering-oauth-invoke-browser nil
+  "*Whether to invoke a browser on authorization of access key automatically.")
+
+(defun twittering-oauth-url-encode (str &optional coding-system)
+  "Encode string according to Percent-Encoding defined in RFC 3986."
+  (let ((coding-system (or (when (and coding-system
+				      (coding-system-p coding-system))
+			     coding-system)
+			   'utf-8)))
+    (mapconcat
+     (lambda (c)
+       (cond
+	((or (and (<= ?A c) (<= c ?Z))
+	     (and (<= ?a c) (<= c ?z))
+	     (and (<= ?0 c) (<= c ?9))
+	     (eq ?. c)
+	     (eq ?- c)
+	     (eq ?_ c)
+	     (eq ?~ c))
+	 (char-to-string c))
+	(t (format "%%%02X" c))))
+     (encode-coding-string str coding-system)
+     "")))
+
+(defun twittering-oauth-unhex (c)
+  (cond
+   ((and (<= ?0 c) (<= c ?9))
+    (- c ?0))
+   ((and (<= ?A c) (<= c ?F))
+    (+ 10 (- c ?A)))
+   ((and (<= ?a c) (<= c ?f))
+    (+ 10 (- c ?a)))
+   ))
+
+(defun twittering-oauth-url-decode (str &optional coding-system)
+  (let* ((coding-system (or (when (and coding-system
+				       (coding-system-p coding-system))
+			      coding-system)
+			    'utf-8))
+	 (substr-list (split-string str "%"))
+	 (head (car substr-list))
+	 (tail (cdr substr-list)))
+    (decode-coding-string
+     (concat
+      head
+      (mapconcat
+       (lambda (substr)
+	 (if (string-match "\\`\\([0-9a-fA-F]\\)\\([0-9a-fA-F]\\)\\(.*\\)\\'"
+			   substr)
+	     (let* ((c1 (string-to-char (match-string 1 substr)))
+		    (c0 (string-to-char (match-string 2 substr)))
+		    (tail (match-string 3 substr))
+		    (ch (+ (* 16 (twittering-oauth-unhex c1))
+			   (twittering-oauth-unhex c0))))
+	       (concat (char-to-string ch) tail))
+	   substr))
+       tail
+       ""))
+     coding-system)))
+
+(defun twittering-oauth-make-signature-base-string (method base-url parameters)
+  ;; "OAuth Core 1.0a"
+  ;; http://oauth.net/core/1.0a/#anchor13
+  (let* ((sorted-parameters (copy-sequence parameters))
+	 (sorted-parameters
+	  (sort sorted-parameters
+		(lambda (entry1 entry2)
+		  (string< (car entry1) (car entry2))))))
+    (concat
+     method
+     "&"
+     (twittering-oauth-url-encode base-url)
+     "&"
+     (mapconcat
+      (lambda (entry)
+	(let ((key (car entry))
+	      (value (cdr entry)))
+	  (concat (twittering-oauth-url-encode key)
+		  "%3D"
+		  (twittering-oauth-url-encode value))))
+      sorted-parameters
+      "%26"))))
+
+(defun twittering-oauth-make-random-string (len)
+  (let* ((table
+	  (concat
+	   "0123456789"
+	   "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	   "abcdefghijklmnopqrstuvwxyz"))
+	 (n (length table))
+	 (l 0)
+	 (result (make-string len ?0)))
+    (while (< l len)
+      (aset result l (aref table (random n)))
+      (setq l (1+ l)))
+    result))
+
+;;;
+;;; The below function is derived from `hmac-sha1' retrieved
+;;; from http://www.emacswiki.org/emacs/HmacShaOne.
+;;;
+(defun twittering-hmac-sha1 (key message)
+  "Return an HMAC-SHA1 authentication code for KEY and MESSAGE.
+
+KEY and MESSAGE must be unibyte strings.  The result is a unibyte
+string.  Use the function `encode-hex-string' or the function
+`base64-encode-string' to produce human-readable output.
+
+See URL:<http://en.wikipedia.org/wiki/HMAC> for more information
+on the HMAC-SHA1 algorithm.
+
+The Emacs multibyte representation actually uses a series of
+8-bit values under the hood, so we could have allowed multibyte
+strings as arguments.  However, internal 8-bit values don't
+correspond to any external representation \(at least for major
+version 22).  This makes multibyte strings useless for generating
+hashes.
+
+Instead, callers must explicitly pick and use an encoding for
+their multibyte data.  Most callers will want to use UTF-8
+encoding, which we can generate as follows:
+
+  (let ((unibyte-key   (encode-coding-string key   'utf-8 t))
+        (unibyte-value (encode-coding-string value 'utf-8 t)))
+    (twittering-hmac-sha1 unibyte-key unibyte-value))
+
+For keys and values that are already unibyte, the
+`encode-coding-string' calls just return the same string."
+;;; Return an HMAC-SHA1 authentication code for KEY and MESSAGE.
+;;; 
+;;; KEY and MESSAGE must be unibyte strings.  The result is a unibyte
+;;; string.  Use the function `encode-hex-string' or the function
+;;; `base64-encode-string' to produce human-readable output.
+;;; 
+;;; See URL:<http://en.wikipedia.org/wiki/HMAC> for more information
+;;; on the HMAC-SHA1 algorithm.
+;;; 
+;;; The Emacs multibyte representation actually uses a series of
+;;; 8-bit values under the hood, so we could have allowed multibyte
+;;; strings as arguments.  However, internal 8-bit values don't
+;;; correspond to any external representation \(at least for major
+;;; version 22).  This makes multibyte strings useless for generating
+;;; hashes.
+;;; 
+;;; Instead, callers must explicitly pick and use an encoding for
+;;; their multibyte data.  Most callers will want to use UTF-8
+;;; encoding, which we can generate as follows:
+;;; 
+;;; (let ((unibyte-key   (encode-coding-string key   'utf-8 t))
+;;;       (unibyte-value (encode-coding-string value 'utf-8 t)))
+;;; (hmac-sha1 unibyte-key unibyte-value))
+;;; 
+;;; For keys and values that are already unibyte, the
+;;; `encode-coding-string' calls just return the same string.
+;;;
+;;; Author: Derek Upham - sand (at) blarg.net
+;;;
+;;; Copyright: This code is in the public domain.
+  (require 'sha1)
+  (when (multibyte-string-p key)
+    (error "key must be unibyte"))
+  (when (multibyte-string-p message)
+    (error "message must be unibyte"))
+
+  ;; The key block is always exactly the block size of the hash
+  ;; algorithm.  If the key is too small, we pad it with zeroes (or
+  ;; instead, we initialize the key block with zeroes and copy the
+  ;; key onto the nulls).  If the key is too large, we run it
+  ;; through the hash algorithm and use the hashed value (strange
+  ;; but true).
+
+  (let ((+hmac-sha1-block-size-bytes+ 64)) ; SHA-1 uses 512-bit blocks
+    (when (< +hmac-sha1-block-size-bytes+ (length key))
+      (setq key (sha1 key nil nil t)))
+
+    (let ((key-block (make-vector +hmac-sha1-block-size-bytes+ 0)))
+      (dotimes (i (length key))
+	(aset key-block i (aref key i)))
+
+      (let ((opad (make-vector +hmac-sha1-block-size-bytes+ #x5c))
+	    (ipad (make-vector +hmac-sha1-block-size-bytes+ #x36)))
+
+	(dotimes (i +hmac-sha1-block-size-bytes+)
+	  (aset ipad i (logxor (aref ipad i) (aref key-block i)))
+	  (aset opad i (logxor (aref opad i) (aref key-block i))))
+
+	(when (fboundp 'unibyte-string)
+	  ;; `concat' of Emacs23 (and later?) generates a multi-byte
+	  ;; string from a vector of characters with eight bit.
+	  ;; Since `opad' and `ipad' must be unibyte, we have to
+	  ;; convert them by using `unibyte-string'.
+	  ;; We cannot use `string-as-unibyte' here because it encodes
+	  ;; bytes with the manner of UTF-8.
+	  (setq opad (apply 'unibyte-string (mapcar 'identity opad)))
+	  (setq ipad (apply 'unibyte-string (mapcar 'identity ipad))))
+
+	(sha1 (concat opad
+		      (sha1 (concat ipad message)
+			    nil nil t))
+	      nil nil t)))))
+
+(defun twittering-oauth-auth-str (method base-url query-parameters oauth-parameters key)
+  "Generate the value for HTTP Authorization header on OAuth.
+QUERY-PARAMETERS is an alist for query parameters, where name and value
+must be encoded into the same as they will be sent."
+  (let* ((parameters (append query-parameters oauth-parameters))
+	 (base-string
+	  (twittering-oauth-make-signature-base-string method base-url parameters))
+	 (key (if (multibyte-string-p key)
+		  (string-make-unibyte key)
+		key))
+	 (base-string (if (multibyte-string-p base-string)
+			  (string-make-unibyte base-string)
+			base-string))
+	 (signature
+	  (base64-encode-string (twittering-hmac-sha1 key base-string))))
+    (concat
+     "OAuth "
+     (mapconcat
+      (lambda (entry)
+	(concat (car entry) "=\"" (cdr entry) "\""))
+      oauth-parameters
+      ",")
+     ",oauth_signature=\"" (twittering-oauth-url-encode signature) "\"")))
+
+(defun twittering-oauth-auth-str-request-token (url query-parameters consumer-key consumer-secret &optional oauth-parameters)
+  (let ((key (concat consumer-secret "&"))
+	(oauth-params
+	 (or oauth-parameters
+	     `(("oauth_nonce" . ,(twittering-oauth-make-random-string 43))
+	       ("oauth_callback" . "oob")
+	       ("oauth_signature_method" . "HMAC-SHA1")
+	       ("oauth_timestamp" . ,(format-time-string "%s"))
+	       ("oauth_consumer_key" . ,consumer-key)
+	       ("oauth_version" . "1.0")))))
+    (twittering-oauth-auth-str "POST" url query-parameters oauth-params key)))
+
+(defun twittering-oauth-auth-str-exchange-token (url query-parameters consumer-key consumer-secret request-token request-token-secret verifier &optional oauth-parameters)
+  (let ((key (concat consumer-secret "&" request-token-secret))
+	(oauth-params
+	 (or oauth-parameters
+	     `(("oauth_consumer_key" . ,consumer-key)
+	       ("oauth_nonce" . ,(twittering-oauth-make-random-string 43))
+	       ("oauth_signature_method" . "HMAC-SHA1")
+	       ("oauth_timestamp" . ,(format-time-string "%s"))
+	       ("oauth_version" . "1.0")
+	       ("oauth_token" . ,request-token)
+	       ("oauth_verifier" . ,verifier)))))
+    (twittering-oauth-auth-str "POST" url query-parameters oauth-params key)))
+
+(defun twittering-oauth-auth-str-access (method url query-parameters consumer-key consumer-secret access-token access-token-secret &optional oauth-parameters)
+  "Generate a string for Authorization in HTTP header on OAuth.
+METHOD means HTTP method such as \"GET\", \"POST\", etc. URL means a simple
+URL without port number and query parameters.
+QUERY-PARAMETERS means an alist of query parameters such as
+'((\"status\" . \"test%20tweet\")
+  (\"in_reply_to_status_id\" . \"12345678\")),
+where name and value must be encoded into the same as they will be sent.
+CONSUMER-KEY and CONSUMER-SECRET specifies the consumer.
+ACCESS-TOKEN and ACCESS-TOKEN-SECRET must be authorized before calling this
+function."
+  (let ((key (concat consumer-secret "&" access-token-secret))
+	(oauth-params
+	 (or oauth-parameters
+	     `(("oauth_consumer_key" . ,consumer-key)
+	       ("oauth_nonce" . ,(twittering-oauth-make-random-string 43))
+	       ("oauth_signature_method" . "HMAC-SHA1")
+	       ("oauth_timestamp" . ,(format-time-string "%s"))
+	       ("oauth_version" . "1.0")
+	       ("oauth_token" . ,access-token)))))
+    (twittering-oauth-auth-str method url query-parameters oauth-params key)))
+
+;; "Using xAuth | dev.twitter.com"
+;; http://dev.twitter.com/pages/xauth
+(defun twittering-xauth-auth-str-access-token (url query-parameters consumer-key consumer-secret username password &optional oauth-parameters)
+  (let ((key (concat consumer-secret "&"))
+	(oauth-params
+	 (or oauth-parameters
+	     `(("oauth_nonce" . ,(twittering-oauth-make-random-string 43))
+	       ("oauth_signature_method" . "HMAC-SHA1")
+	       ("oauth_timestamp" . ,(format-time-string "%s"))
+	       ("oauth_consumer_key" . ,consumer-key)
+	       ("oauth_version" . "1.0"))))
+	(query-params
+	 (append query-parameters
+		 `(("x_auth_mode" . "client_auth")
+		   ("x_auth_password"
+		    . ,(twittering-oauth-url-encode password))
+		   ("x_auth_username"
+		    . ,(twittering-oauth-url-encode username))))))
+    (twittering-oauth-auth-str "POST" url query-params oauth-params key)))
+
+;; "OAuth Core 1.0a"
+;; http://oauth.net/core/1.0a/#response_parameters
+(defun twittering-oauth-make-response-alist (str)
+  (mapcar
+   (lambda (entry)
+     (let* ((pair (split-string entry "="))
+	    (name-entry (car pair))
+	    (value-entry (cadr pair))
+	    (name (and name-entry (twittering-oauth-url-decode name-entry)))
+	    (value (and value-entry
+			(twittering-oauth-url-decode value-entry))))
+       `(,name . ,value)))
+   (split-string str "&")))
+
+(defun twittering-oauth-get-response-alist (buffer)
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (when (search-forward-regexp
+	   "\\`\\(\\(HTTP/1\.[01]\\) \\([0-9][0-9][0-9]\\) \\(.*?\\)\\)\r?\n"
+	   nil t)
+      (let ((status-line (match-string 1))
+	    (http-version (match-string 2))
+	    (status-code (match-string 3))
+	    (reason-phrase (match-string 4)))
+	(cond
+	 ((not (string-match "2[0-9][0-9]" status-code))
+	  (message "Response: %s" status-line)
+	  nil)
+	 ((search-forward-regexp "\r?\n\r?\n" nil t)
+	  (let ((beg (match-end 0))
+		(end (point-max)))
+	    (twittering-oauth-make-response-alist (buffer-substring beg end))))
+	 (t
+	  (message "Response: %s" status-line)
+	  nil))))))
+
+(defun twittering-oauth-get-token-alist-url (url auth-str post-body)
+  (let* ((url-request-method "POST")
+	 (url-request-extra-headers
+	  `(("Authorization" . ,auth-str)
+	    ("Accept-Charset" . "us-ascii")
+	    ("Content-Type" . "application/x-www-form-urlencoded")
+	    ("Content-Length" . ,(format "%d" (length post-body)))))
+	 (url-request-data post-body)
+	 (coding-system-for-read 'utf-8-unix))
+    (lexical-let ((result 'queried))
+      (let ((buffer
+	     (url-retrieve
+	      url
+	      (lambda (&rest args)
+		(let* ((status (if (< 21 emacs-major-version)
+				   (car args)
+				 nil))
+		       (callback-args (if (< 21 emacs-major-version)
+					  (cdr args)
+					args))
+		       (response-buffer (current-buffer)))
+		  (setq result
+			(twittering-oauth-get-response-alist response-buffer))
+		  )))))
+	(while (eq result 'queried)
+	  (sit-for 0.1))
+	(unless twittering-debug-mode
+	  (kill-buffer buffer))
+	result))))
+
+(defun twittering-oauth-get-token-alist (url auth-str &optional post-body)
+  (let ((request
+	 (twittering-make-http-request-from-uri
+	  "POST"
+	  `(("Authorization" . ,auth-str)
+	    ("Accept-Charset" . "us-ascii")
+	    ("Content-Type" . "application/x-www-form-urlencoded")
+	    ("Content-Length" . ,(format "%d" (length post-body))))
+	  url post-body)))
+    (lexical-let ((result 'queried))
+      (twittering-send-http-request
+       request nil
+       (lambda (proc status-str connection-info)
+	 (let ((buffer (process-buffer proc))
+	       (status (process-status proc))
+	       (exit-status (process-exit-status proc)))
+	   (debug-printf "proc=%s stat=%s exit-status=%s"
+			 proc status exit-status)
+	   (cond
+	    ((not (memq status '(nil closed exit failed signal)))
+	     ;; continue
+	     )
+	    ((and (process-command proc)
+		  (not (= 0 exit-status)))
+	     (message "%s exited abnormally (exit-status=%s)."
+		      (car (process-command proc)) exit-status)
+	     (setq result nil))
+	    ((buffer-live-p buffer)
+	     (when twittering-debug-mode
+	       (with-current-buffer (twittering-debug-buffer)
+		 (insert-buffer-substring buffer)))
+	     (let ((func (cdr (assq 'pre-process-buffer connection-info))))
+	       (when (functionp func)
+		 ;; Pre-process buffer.
+		 (funcall func proc buffer connection-info)))
+	     (setq result (twittering-oauth-get-response-alist buffer)))
+	    (t
+	     (setq result nil))))))
+      (while (eq result 'queried)
+	(sit-for 0.1))
+      result)))
+
+(defun twittering-oauth-get-request-token (url consumer-key consumer-secret)
+  (let ((auth-str
+	 (twittering-oauth-auth-str-request-token
+	  url nil consumer-key consumer-secret)))
+    (twittering-oauth-get-token-alist url auth-str)))
+
+(defun twittering-oauth-exchange-request-token (url consumer-key consumer-secret request-token request-token-secret verifier)
+  (let ((auth-str
+	 (twittering-oauth-auth-str-exchange-token
+	  url nil
+	  consumer-key consumer-secret
+	  request-token request-token-secret verifier)))
+    (twittering-oauth-get-token-alist url auth-str)))
+
+(defun twittering-oauth-get-access-token (request-token-url authorize-url-func access-token-url consumer-key consumer-secret consumer-name)
+  "Return an alist of authorized access token.
+The function retrieves a request token from the site specified by
+REQUEST-TOKEN-URL. Then, The function asks a WWW browser to authorize the
+token by calling `browse-url'. The URL for authorization is calculated by
+calling AUTHORIZE-URL-FUNC with the request token as an argument.
+AUTHORIZE-URL-FUNC is called as `(funcal AUTHORIZE-URL-FUNC request-token)',
+where the request-token is a string.
+After calling `browse-url', the function waits for user to input the PIN code
+that is displayed in the browser. The request token is authorized by the
+PIN code, and then it is exchanged for the access token on the site
+specified by ACCESS-TOKEN-URL.
+CONSUMER-KEY and CONSUMER-SECRET specify the consumer.
+CONSUMER-NAME is displayed at the guide of authorization.
+
+The access token is returned as a list of a cons pair of name and value
+like following:
+ ((\"oauth_token\"
+  . \"819797-Jxq8aYUDRmykzVKrgoLhXSq67TEa5ruc4GJC2rWimw\")
+  (\"oauth_token_secret\"
+   . \"J6zix3FfA9LofH0awS24M3HcBYXO5nI1iYe8EfBA\")
+  (\"user_id\" . \"819797\")
+  (\"screen_name\" . \"episod\"))
+."
+  (let* ((request-token-alist
+	  (twittering-oauth-get-request-token
+	   request-token-url consumer-key consumer-secret))
+	 (request-token (cdr (assoc "oauth_token" request-token-alist)))
+	 (request-token-secret
+	  (cdr (assoc "oauth_token_secret" request-token-alist)))
+	 (authorize-url (funcall authorize-url-func request-token))
+	 (str
+	  (concat
+	   (propertize "Authorization via OAuth\n" 'face 'bold)
+	   "\n"
+	   "1.Allow access by " consumer-name " on the below site.\n"
+	   "\n  "
+	   (propertize authorize-url 'url authorize-url 'face 'bold)
+	   "\n"
+	   "\n"
+	   (when twittering-oauth-invoke-browser
+	     (concat
+	      "  Emacs invokes your browser by the function `browse-url'.\n"
+	      "  If the site is not opened automatically, you have to open\n"
+	      "  the site manually.\n"
+	      "\n"))
+	   "2.After allowing access, the site will display the PIN code."
+	   "\n"
+	   "  Input the PIN code "
+	   (propertize "at the below minibuffer." 'face 'bold))))
+    (when request-token-alist
+      (with-temp-buffer
+	(switch-to-buffer (current-buffer))
+	(let* ((str-height (length (split-string str "\n")))
+	       (height (max 0 (- (/ (- (window-text-height) 1) 2)
+				 (/ str-height 2)))))
+	  (insert (make-string height ?\n) str)
+	  (if twittering-oauth-invoke-browser
+	      (browse-url authorize-url)
+	    (when (y-or-n-p "Open authorization URL with browser? (using `browse-url')")
+	      (browse-url authorize-url)))
+	  (let* ((pin
+		  (block pin-input-block
+		    (while t
+		      (let ((pin-input (read-string "Input PIN code: ")))
+			(when (string-match "^\\s-*\\([0-9]+\\)\\s-*$" pin-input)
+			  (return-from pin-input-block
+			    (match-string 1 pin-input)))))))
+		 (verifier pin))
+	    (twittering-oauth-exchange-request-token
+	     access-token-url
+	     consumer-key consumer-secret
+	     request-token request-token-secret verifier)))))))
+
+(defun twittering-xauth-get-access-token (access-token-url consumer-key consumer-secret username password)
+  (let ((auth-str
+	 (twittering-xauth-auth-str-access-token
+	  access-token-url nil consumer-key consumer-secret
+	  username password))
+	(post-body
+	 (mapconcat (lambda (pair)
+		      (format "%s=%s" (car pair)
+			      (twittering-oauth-url-encode (cdr pair))))
+		    `(("x_auth_mode" . "client_auth")
+		      ("x_auth_password" . ,password)
+		      ("x_auth_username" . ,username))
+		    "&")))
+    (twittering-oauth-get-token-alist access-token-url auth-str post-body)))
+
+;;;
+;;; Private storage
+;;;
+
+(defun twittering-load-private-info ()
+  (let* ((file twittering-private-info-file)
+	 (decrypted-str (twittering-read-from-encrypted-file file))
+	 (loaded-alist
+	  (when decrypted-str
+	    (condition-case nil
+		(read decrypted-str)
+	      (error
+	       nil)))))
+    (when loaded-alist
+      (remove
+       nil
+       (mapcar
+	(lambda (pair)
+	  (when (consp pair)
+	    (let ((sym (car pair))
+		  (value (cdr pair)))
+	      (cond
+	       ((memq sym twittering-variables-stored-with-encryption)
+		(set sym value)
+		sym)
+	       (t
+		nil)))))
+	loaded-alist)))))
+
+(defun twittering-load-private-info-with-guide ()
+  (let ((str (concat
+	      "Loading authorized access token for OAuth from\n"
+	      (format "%s.\n" twittering-private-info-file)
+	      "\n"
+	      (propertize "Please input the master password.\n" 'face 'bold)
+	      "\n"
+	      "To cancel it, you may need to press C-g multiple times.\n"
+	      )))
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let* ((str-height (length (split-string str "\n")))
+	     (height (max 0 (- (/ (- (window-text-height) 1) 2)
+			       (/ str-height 2)))))
+	(insert (make-string height ?\n) str)
+	(set-buffer-modified-p nil)
+	(twittering-load-private-info)))))
+
+(defun twittering-save-private-info ()
+  (let* ((obj (mapcar (lambda (sym)
+			`(,sym . ,(symbol-value sym)))
+		      twittering-variables-stored-with-encryption))
+	 (str (with-output-to-string (pp obj)))
+	 (file twittering-private-info-file))
+    (when (twittering-write-and-encrypt file str)
+      (set-file-modes file #o600))))
+
+(defun twittering-save-private-info-with-guide ()
+  (let ((str (concat
+	      "Saving authorized access token for OAuth to "
+	      (format "%s.\n" twittering-private-info-file)
+	      "\n"
+	      (propertize "Please input a master password twice."
+			  'face 'bold))))
+    (with-temp-buffer
+      (switch-to-buffer (current-buffer))
+      (let* ((str-height (length (split-string str "\n")))
+	     (height (max 0 (- (/ (- (window-text-height) 1) 2)
+			       (/ str-height 2)))))
+	(insert (make-string height ?\n) str)
+	(set-buffer-modified-p nil)
+	(twittering-save-private-info)))))
+
+(defun twittering-capable-of-encryption-p ()
+  (and (or (require 'epa nil t) (require 'alpaca nil t))
+       (executable-find "gpg")))
+
+(defun twittering-read-from-encrypted-file (file)
+  (cond
+   ((require 'epa nil t)
+    (let ((context (epg-make-context epa-protocol)))
+      (epg-context-set-passphrase-callback
+       context #'epa-passphrase-callback-function)
+      (epg-context-set-progress-callback
+       context
+       (cons #'epa-progress-callback-function
+	     (format "Decrypting %s..." (file-name-nondirectory file))))
+      (message "Decrypting %s..." (file-name-nondirectory file))
+      (condition-case err
+	  (epg-decrypt-file context file nil)
+	(error
+	 (message "%s" (cdr err))
+	 nil))))
+   ((require 'alpaca nil t)
+    (with-temp-buffer
+      (let ((buffer-file-name file)
+	    (alpaca-regex-suffix ".*")
+	    (temp-buffer (current-buffer)))
+	(insert-file-contents-literally file)
+	(set-buffer-modified-p nil)
+	(condition-case nil
+	    (progn
+	      (alpaca-after-find-file)
+	      (if (eq temp-buffer (current-buffer))
+		  (buffer-string)
+		;; `alpaca-after-find-file' kills the current buffer
+		;; if the decryption is failed.
+		nil))
+	  (error
+	   (when (eq temp-buffer (current-buffer))
+	     (delete-region (point-min) (point-max)))
+	   nil)))))
+   (t
+    nil)))
+
+(defun twittering-write-and-encrypt (file str)
+  (cond
+   ((require 'epg nil t)
+    (let ((context (epg-make-context epa-protocol)))
+      (epg-context-set-passphrase-callback
+       context #'epa-passphrase-callback-function)
+      (epg-context-set-progress-callback
+       context (cons #'epa-progress-callback-function "Encrypting..."))
+      (message "Encrypting...")
+      (condition-case err
+	  (unwind-protect
+	      ;; In order to prevent `epa-file' to encrypt the file double,
+	      ;; `epa-file-name-regexp' is temorarily changed into the null
+	      ;; regexp that never matches any string.
+	      (let ((epa-file-name-regexp "\\`\\'"))
+		(when (fboundp 'epa-file-name-regexp-update)
+		  (epa-file-name-regexp-update))
+		(with-temp-file file
+		  (set-buffer-multibyte nil)
+		  (delete-region (point-min) (point-max))
+		  (insert (epg-encrypt-string context str nil))
+		  (message "Encrypting...wrote %s" file)
+		  t))
+	    (when (fboundp 'epa-file-name-regexp-update)
+	      (epa-file-name-regexp-update)))
+	(error
+	 (message "%s" (cdr err))
+	 nil))))
+   ((require 'alpaca nil t)
+    ;; Create the file.
+    ;; This is required because `alpaca-save-buffer' checks its timestamp.
+    (with-temp-file file)
+    (with-temp-buffer
+      (let ((buffer-file-name file))
+	(insert str)
+	(condition-case nil
+	    (if (alpaca-save-buffer)
+		t
+	      (delete-file file)
+	      nil)
+	  (error
+	   (when (file-exists-p file)
+	     (delete-file file))
+	   nil)))))
+   (t
+    nil)))
 
 ;;;
 ;;; to show image files
@@ -399,12 +1472,13 @@ icon mode; otherwise, turn off icon mode."
 	    (< 0 (prefix-numeric-value arg))))
     (unless (eq prev-mode twittering-icon-mode)
       (twittering-update-mode-line)
-      (twittering-render-timeline (current-buffer)))))
+      (twittering-render-timeline (current-buffer) nil nil t))))
 
-(defvar twittering-image-data-table (make-hash-table :test 'equal))
+(defvar twittering-icon-prop-hash (make-hash-table :test 'equal)
+  "Hash table for storing display properties of icon. The key is the size of
+icon and the value is a hash. The key of the child hash is URL and its value
+is the display property for the icon.")
 
-(defvar twittering-image-stack nil)
-(defvar twittering-image-type-cache nil)
 (defvar twittering-convert-program (executable-find "convert"))
 (defvar twittering-convert-fix-size 48)
 (defvar twittering-use-convert (not (null twittering-convert-program))
@@ -412,16 +1486,170 @@ icon mode; otherwise, turn off icon mode."
 is non-nil. If this variable is non-nil, icon images are converted by
 invoking \"convert\". Otherwise, cropped images are displayed.")
 
-(defun twittering-image-type (image-url buffer)
-  "Return the type of a given image based on the URL (IMAGE-URL)
-and its contents (BUFFER)"
-  (let ((type-cache (assoc image-url twittering-image-type-cache))
-	(case-fold-search t))
-    (if type-cache
-	(cdr type-cache)
-      (let ((image-type (image-type-from-data (buffer-string))))
-	(add-to-list 'twittering-image-type-cache `(,image-url . ,image-type))
-	image-type))))
+(defvar twittering-use-profile-image-api nil
+  "*Whether to use `profile_image' API for retrieving scaled icon images.
+NOTE: This API is rate limited.")
+
+(defconst twittering-error-icon-data-pair
+  '(xpm . "/* XPM */
+static char * yellow3_xpm[] = {
+\"16 16 2 1\",
+\" 	c None\",
+\".	c #FF0000\",
+\"................\",
+\".              .\",
+\". .          . .\",
+\".  .        .  .\",
+\".   .      .   .\",
+\".    .    .    .\",
+\".     .  .     .\",
+\".      ..      .\",
+\".      ..      .\",
+\".     .  .     .\",
+\".    .    .    .\",
+\".   .      .   .\",
+\".  .        .  .\",
+\". .          . .\",
+\".              .\",
+\"................\"};
+")
+  "Image used when the valid icon cannot be retrieved.")
+
+(defun twittering-get-display-spec-for-icon (image-url)
+  (let ((hash
+	 (gethash twittering-convert-fix-size twittering-icon-prop-hash)))
+    (when hash
+      (gethash image-url hash))))
+
+(defun twittering-convert-image-data (image-data dest-type &optional src-type)
+  "Convert IMAGE-DATA into XPM format and return it. If it fails to convert,
+return nil."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (buffer-disable-undo)
+    (let ((coding-system-for-read 'binary)
+	  (coding-system-for-write 'binary)
+	  (require-final-newline nil))
+      (insert image-data)
+      (let* ((args
+	      `(,(if src-type (format "%s:-" src-type) "-")
+		,@(when (integerp twittering-convert-fix-size)
+		    `("-resize"
+		      ,(format "%dx%d" twittering-convert-fix-size
+			       twittering-convert-fix-size)))
+		,(format "%s:-" dest-type)))
+	     (exit-status
+	      (apply 'call-process-region (point-min) (point-max)
+		     twittering-convert-program t t nil args)))
+	(if (equal 0 exit-status)
+	    (buffer-string)
+	  ;; failed to convert the image.
+	  nil)))))
+
+(defun twittering-create-image-pair (image-data)
+  "Return a pair of image type and image data.
+IMAGE-DATA is converted by `convert' if the image type of IMAGE-DATA is not
+available and `twittering-use-convert' is non-nil."
+  (let* ((image-type (and image-data (image-type-from-data image-data)))
+	 (image-pair `(,image-type . ,image-data))
+	 (converted-size
+	  `(,twittering-convert-fix-size . ,twittering-convert-fix-size)))
+    (cond
+     ((null image-data)
+      twittering-error-icon-data-pair)
+     ((and (image-type-available-p image-type)
+	   (or (not (integerp twittering-convert-fix-size))
+	       (equal (image-size (create-image image-data image-type t) t)
+		      converted-size)))
+      image-pair)
+     (twittering-use-convert
+      (let ((converted-data
+	     (twittering-convert-image-data image-data 'xpm image-type)))
+	(if converted-data
+	    `(xpm . ,converted-data)
+	  twittering-error-icon-data-pair)))
+     (t
+      twittering-error-icon-data-pair))))
+
+(defun twittering-register-image-data (image-url image-data)
+  (let ((image-pair (twittering-create-image-pair image-data)))
+    (when image-pair
+      (let ((hash (gethash twittering-convert-fix-size
+			   twittering-icon-prop-hash)))
+	(unless hash
+	  (setq hash (make-hash-table :test 'equal))
+	  (puthash twittering-convert-fix-size hash
+		   twittering-icon-prop-hash))
+	(let ((spec (twittering-make-display-spec-for-icon image-pair)))
+	  (puthash image-url spec hash)
+	  spec)))))
+
+(defun twittering-make-slice-spec (image-spec)
+  "Return slice property for reducing the image size by cropping it."
+  (let* ((size (image-size image-spec t))
+	 (width (car size))
+	 (height (cdr size))
+	 (fixed-length twittering-convert-fix-size)
+	 (half-fixed-length (/ fixed-length 2)))
+    (if (or (< fixed-length width) (< fixed-length height))
+	`(slice ,(max 0 (- (/ width 2) half-fixed-length))
+		,(max 0 (- (/ height 2) half-fixed-length))
+		,fixed-length ,fixed-length)
+      `(slice 0 0 ,fixed-length ,fixed-length))))
+
+(defun twittering-make-display-spec-for-icon (image-pair)
+  "Return the specification for `display' text property, which
+limits the size of an icon image IMAGE-PAIR up to FIXED-LENGTH. If
+the type of the image is not supported, nil is returned.
+
+If the size of the image exceeds FIXED-LENGTH, the center of the
+image are displayed."
+  (let* ((type (car-safe image-pair))
+	 (data (cdr-safe image-pair))
+	 (raw-image-spec ;; without margins
+	  (create-image data type t))
+	 (slice-spec
+	  (when (and twittering-convert-fix-size (not twittering-use-convert))
+	    (twittering-make-slice-spec raw-image-spec)))
+	 (image-spec
+	  (if (fboundp 'create-animated-image) ;; Emacs24 or later
+	      (create-animated-image data type t :margin 2 :ascent 'center)
+	    (create-image data type t :margin 2 :ascent 'center))))
+    (if slice-spec
+	`(display (,image-spec ,slice-spec))
+      `(display ,image-spec))))
+
+(defun twittering-make-icon-string (beg end image-url)
+  (let ((display-spec (twittering-get-display-spec-for-icon image-url))
+	(image-data (gethash image-url twittering-url-data-hash))
+	(properties (and beg (text-properties-at beg)))
+	(icon-string (copy-sequence " ")))
+    (when properties
+      (add-text-properties 0 (length icon-string) properties icon-string))
+    (cond
+     (display-spec
+      (let ((icon-string (apply 'propertize "_"
+				(append properties display-spec))))
+	;; Remove the property required no longer.
+	(remove-text-properties 0 (length icon-string)
+				'(need-to-be-updated nil)
+				icon-string)
+	icon-string))
+     ((and (integerp image-data)
+	   (<= twittering-url-request-retry-limit image-data))
+      ;; Try to retrieve the image no longer.
+      (twittering-register-image-data image-url nil)
+      (twittering-make-icon-string beg end image-url))
+     ((and image-data (not (integerp image-data)))
+      (twittering-register-image-data image-url image-data)
+      (twittering-make-icon-string beg end image-url))
+     (t
+      (put-text-property 0 (length icon-string)
+			 'need-to-be-updated
+			 `(twittering-make-icon-string ,image-url)
+			 icon-string)
+      (twittering-url-retrieve-async image-url 'twittering-register-image-data)
+      icon-string))))
 
 ;;;
 ;;; Utility functions
@@ -437,14 +1665,45 @@ and its contents (BUFFER)"
 	    (generate-new-buffer buffer)))))
 
 (defun twittering-get-status-url (username &optional id)
-  "Generate status URL."
+  "Generate a URL of a user or a specific status."
+  (let ((func
+	 (cdr (assq
+	       'status-url
+	       (assq twittering-service-method
+		     twittering-service-method-table)))))
+    (funcall func username id)))
+
+(defun twittering-get-status-url-twitter (username &optional id)
+  "Generate status URL for Twitter."
   (if id
       (format "http://%s/%s/status/%s" twittering-web-host username id)
     (format "http://%s/%s" twittering-web-host username)))
 
+(defun twittering-get-status-url-statusnet (username &optional id)
+  "Generate status URL for StatusNet."
+  (if id
+      (format "http://%s/%s/notice/%s" twittering-web-host twittering-web-path-prefix id)
+    (format "http://%s/%s/%s" twittering-web-host twittering-web-path-prefix username)))
+
 (defun twittering-get-search-url (query-string)
+  "Generate a URL for searching QUERY-STRING."
+  (let ((func (cdr (assq
+		    'search-url (assq twittering-service-method
+				      twittering-service-method-table)))))
+    (funcall func query-string)))
+
+(defun twittering-get-search-url-twitter (query-string)
   (format "http://%s/search?q=%s"
 	  twittering-web-host (twittering-percent-encode query-string)))
+
+(defun twittering-get-search-url-statusnet (query-string)
+  (if (string-match "^#\\(.+\\)" query-string)
+      (format "http://%s/%s/tag/%s"
+	      twittering-web-host
+	      twittering-web-path-prefix
+	      (twittering-percent-encode (match-string 1 query-string)))
+    (format "http://%s/search?q=%s"
+	    twittering-web-host (twittering-percent-encode query-string))))
 
 (defun twittering-user-agent-default-function ()
   "Twittering mode default User-Agent function."
@@ -471,32 +1730,29 @@ and its contents (BUFFER)"
   "Return Tweet sign string."
   (funcall twittering-sign-string-function))
 
-(defvar twittering-mode-string "twittering-mode")
-
-(defun twittering-update-mode-line ()
-  "Update mode line."
-  (let ((enabled-options
-	 `(,@(unless (twittering-buffer-active-p) '("INACTIVE"))
+(defun twittering-mode-line-buffer-identification ()
+  (let ((active-mode-indicator
+	 (if twittering-active-mode
+	     twittering-modeline-active
+	   twittering-modeline-inactive))
+	(enabled-options
+	 `(,@(when twittering-use-ssl `(,twittering-modeline-ssl))
 	   ,@(when twittering-jojo-mode '("jojo"))
 	   ,@(when twittering-icon-mode '("icon"))
 	   ,@(when twittering-reverse-mode '("reverse"))
 	   ,@(when twittering-scroll-mode '("scroll"))
-	   ,@(when twittering-proxy-use '("proxy"))
-	   ,@(when twittering-use-ssl '("ssl")))))
-    (setq mode-name
-	  (concat twittering-mode-string
-		  (if twittering-display-remaining
-		      (format " %d/%d"
-			      (twittering-get-ratelimit-remaining)
-			      (twittering-get-ratelimit-limit))
-		    "")
-		  (if enabled-options
-		      (concat "["
-			      (mapconcat 'identity enabled-options ",")
-			      "]")
-		    ""))))
-  (force-mode-line-update)
-  )
+	   ,@(when twittering-proxy-use '("proxy")))))
+    (concat active-mode-indicator
+	    (when twittering-display-remaining
+	      (format " %d/%d"
+		      (twittering-get-ratelimit-remaining)
+		      (twittering-get-ratelimit-limit)))
+	    (when enabled-options
+	      (concat "[" (mapconcat 'identity enabled-options " ") "]")))))
+
+(defun twittering-update-mode-line ()
+  "Update mode line."
+  (force-mode-line-update))
 
 (defun twittering-status-id< (id1 id2)
   (let ((len1 (length id1))
@@ -509,7 +1765,7 @@ and its contents (BUFFER)"
 (defun twittering-status-id= (id1 id2)
   (equal id1 id2))
 
-(defun twittering-fill-string (str &optional adjustment)
+(defun twittering-fill-string (str &optional adjustment prefix keep-newline)
   (when (and (not (boundp 'kinsoku-limit))
 	     enable-kinsoku)
     ;; `kinsoku-limit' is defined on loading "international/kinsoku.el".
@@ -523,9 +1779,6 @@ and its contents (BUFFER)"
     (load "international/kinsoku"))
   (let* ((kinsoku-limit 1)
 	 (adjustment (+ (or adjustment 0)
-			(if (and (boundp 'fill-prefix) (stringp fill-prefix))
-			    (string-width fill-prefix)
-			  0)
 			(if enable-kinsoku
 			    kinsoku-limit
 			  0)))
@@ -540,9 +1793,19 @@ and its contents (BUFFER)"
 	 (temporary-fill-column (- (or twittering-fill-column (1- min-width))
 				   adjustment)))
     (with-temp-buffer
-      (let ((fill-column temporary-fill-column))
-	(insert str)
-	(fill-region-as-paragraph (point-min) (point-max))
+      (let ((fill-column temporary-fill-column)
+	    (fill-prefix (or prefix fill-prefix))
+	    (adaptive-fill-regexp ""))
+	(if keep-newline
+	    (let* ((hard-newline (propertize "\n" 'hard t))
+		   (str (mapconcat 'identity (split-string str "\n")
+				   (concat hard-newline fill-prefix))))
+	      (use-hard-newlines)
+	      (insert (concat prefix str))
+	      (fill-region (point-min) (point-max))
+	      (remove-text-properties (point-min) (point-max) '(hard nil)))
+	  (insert (concat prefix str))
+	  (fill-region-as-paragraph (point-min) (point-max)))
 	(buffer-substring (point-min) (point-max))))))
 
 (defun twittering-set-window-end (window pos)
@@ -558,7 +1821,7 @@ and its contents (BUFFER)"
 		  (not (pos-visible-in-window-p pos window))))))
 
 (defun twittering-make-passed-time-string
-  (beg end encoded-created-at &optional additional-properties)
+  (beg end encoded-created-at time-format &optional additional-properties)
   (let* ((now (current-time))
 	 (secs (+ (* (- (car now) (car encoded-created-at)) 65536)
 		  (- (cadr now) (cadr encoded-created-at))))
@@ -575,8 +1838,7 @@ and its contents (BUFFER)"
 	   ((< secs 5400) "about 1 hour ago")
 	   ((< secs 84600) (format "about %d hours ago"
 				   (/ (+ secs 1800) 3600)))
-	   (t (format-time-string "%I:%M %p %B %d, %Y"
-				  encoded-created-at))))
+	   (t (format-time-string time-format encoded-created-at))))
 	 (properties (append additional-properties
 			     (and beg (text-properties-at beg)))))
     ;; Restore properties.
@@ -586,16 +1848,17 @@ and its contents (BUFFER)"
 	(put-text-property 0 (length time-string)
 			   'need-to-be-updated
 			   `(twittering-make-passed-time-string
-			     ,encoded-created-at)
+			     ,encoded-created-at ,time-format)
 			   time-string)
       ;; Remove the property required no longer.
       (remove-text-properties 0 (length time-string) '(need-to-be-updated nil)
 			      time-string))
     time-string))
 
-(defun twittering-update-filled-string (beg end formater status prefix)
+(defun twittering-update-filled-string (beg end formater status prefix local-prefix &optional keep-newline)
   (let* ((str (twittering-fill-string (funcall formater status prefix)
-				      (length prefix)))
+				      (length prefix) local-prefix
+				      keep-newline))
 	 (next (next-single-property-change 0 'need-to-be-updated str))
 	 (properties
 	  (and beg
@@ -612,11 +1875,34 @@ and its contents (BUFFER)"
 	    (and next (< next (length str))))
 	(put-text-property 0 (length str) 'need-to-be-updated
 			   `(twittering-update-filled-string
-			     ,formater ,status ,prefix)
+			     ,formater ,status ,prefix ,local-prefix
+			     ,keep-newline)
 			   str)
       ;; Remove the property required no longer.
       (remove-text-properties 0 (length str) '(need-to-be-updated nil) str))
     str))
+
+(defun twittering-current-window-config (window-list)
+  "Return window parameters of WINDOW-LIST."
+  (mapcar (lambda (win)
+	    (let ((start (window-start win))
+		  (point (window-point win)))
+	      `(,win ,start ,point)))
+	  window-list))
+
+(defun twittering-restore-window-config-after-modification (config beg end)
+  "Restore window parameters changed by modification on given region.
+CONFIG is window parameters made by `twittering-current-window-config'.
+BEG and END mean a region that had been modified."
+  (mapc (lambda (entry)
+	  (let ((win (elt entry 0))
+		(start (elt entry 1))
+		(point (elt entry 2)))
+	    (when (and (< beg start) (< start end))
+	      (set-window-start win start))
+	    (when (and (< beg point) (< point end))
+	      (set-window-point win point))))
+	config))
 
 ;;;
 ;;; Utility functions for portability
@@ -632,12 +1918,41 @@ and its contents (BUFFER)"
   ;; file "unicode(.el)" (which came from Mule-UCS), hence it breaks
   ;; `ucs-to-char' under non Mule-UCS environment. The problem is
   ;; fixed in navi2ch dated 2010-01-16 or later, but not released yet.
-  (if (and (featurep 'unicode) (functionp 'ucs-to-char))
-      (ucs-to-char num)
-    ;; Emacs21 have a partial support for UTF-8 text, so it can decode
-    ;; only parts of a text with Japanese.
-    (or (decode-char 'ucs num)
-	??)))
+  (or (if (and (featurep 'unicode) (functionp 'ucs-to-char))
+	  (ucs-to-char num)
+	;; Emacs21 have a partial support for UTF-8 text, so it can decode
+	;; only parts of a text with Japanese.
+	(decode-char 'ucs num))
+      twittering-unicode-replacement-char))
+
+(defvar twittering-unicode-replacement-char
+  (let ((twittering-unicode-replacement-char ??)
+	(code-point #xFFFD))
+    ;; "Unicode Character 'REPLACEMENT CHARACTER' (U+FFFD)"
+    (twittering-ucs-to-char code-point))
+  "*Replacement character used when `ucs-to-char' or `decode-char' return
+nil.")
+
+(defadvice decode-char (after twittering-add-fail-over-to-decode-char)
+  (when (null ad-return-value)
+    (setq ad-return-value twittering-unicode-replacement-char)))
+
+(defun twittering-xml-parse-region (&rest args)
+  "Wrapped `xml-parse-region' in order to avoid decoding errors.
+After activating the advice `twittering-add-fail-over-to-decode-char',
+`xml-parse-region' is called. This prevents `xml-parse-region' from
+exiting abnormally by decoding unknown numeric character reference."
+  (let ((activated (ad-is-active 'decode-char)))
+    (ad-enable-advice
+     'decode-char 'after 'twittering-add-fail-over-to-decode-char)
+    (ad-activate 'decode-char)
+    (unwind-protect
+	(apply 'xml-parse-region args)
+      (ad-disable-advice 'decode-char 'after
+			 'twittering-add-fail-over-to-decode-char)
+      (if activated
+	  (ad-activate 'decode-char)
+	(ad-deactivate 'decode-char)))))
 
 (defun twittering-remove-duplicates (list)
   "Return a copy of LIST with all duplicate elements removed.
@@ -966,78 +2281,6 @@ direct_messages."
 	(equal spec1 spec2))
     nil))
 
-(defun twittering-timeline-spec-to-host-method (spec)
-  (if (twittering-timeline-spec-primary-p spec)
-      (let ((api-host twittering-api-host)
-	    (search-host twittering-api-search-host)
-	    (type (car spec))
-	    (value (cdr spec)))
-	(cond
-	 ((eq type 'user)
-	  (let ((username (car value)))
-	    `(,api-host ,(concat "1/statuses/user_timeline/" username))))
-	 ((eq type 'list)
-	  (let ((username (car value))
-		(list-name (cadr value)))
-	    `(,api-host
-	      ,(concat "1/" username "/lists/" list-name "/statuses"))))
-	 ((eq type 'direct_messages)
-	  `(,api-host "1/direct_messages"))
-	 ((eq type 'direct_messages_sent)
-	  `(,api-host "1/direct_messages/sent"))
-	 ((eq type 'friends)
-	  `(,api-host "1/statuses/friends_timeline"))
-	 ((eq type 'home)
-	  `(,api-host "1/statuses/home_timeline"))
-	 ((eq type 'mentions)
-	  `(,api-host "1/statuses/mentions"))
-	 ((eq type 'public)
-	  `(,api-host "1/statuses/public_timeline"))
-	 ((eq type 'replies)
-	  `(,api-host "1/statuses/replies"))
-	 ((eq type 'retweeted_by_me)
-	  `(,api-host "1/statuses/retweeted_by_me"))
-	 ((eq type 'retweeted_to_me)
-	  `(,api-host "1/statuses/retweeted_to_me"))
-	 ((eq type 'retweets_of_me)
-	  `(,api-host "1/statuses/retweets_of_me"))
-	 ((eq type 'search)
-	  (let ((word (car value)))
-	    `(,search-host "search" ,word)))
-	 (t
-	  (error "Invalid timeline spec")
-	  nil)))
-    nil))
-
-(defun twittering-host-method-to-timeline-spec (host method &optional word)
-  (cond
-   ((or (not (stringp host)) (not (stringp method))) nil)
-   ((string= host twittering-api-host)
-    (cond
-     ((string= method "1/statuses/direct_messages") '(direct_messages))
-     ((string= method "1/statuses/direct_messages/sent")
-      '(direct_messages_sent))
-     ((string= method "1/statuses/public_timeline") '(public_timeline))
-     ((string= method "1/statuses/home_timeline") '(home))
-     ((string= method "1/statuses/friends_timeline") '(friends))
-     ((string= method "1/statuses/user_timeline")
-      `(user ,(twittering-get-username)))
-     ((string-match "^1/statuses/user_timeline/\\(.+\\)$" method)
-      `(user ,(match-string-no-properties 1 method)))
-     ((string= method "1/statuses/mentions") '(mentions))
-     ((string= method "1/statuses/replies") '(replies))
-     ((string= method "1/statuses/retweeted_by_me") '(retweeted_by_me))
-     ((string= method "1/statuses/retweeted_to_me") '(retweeted_to_me))
-     ((string= method "1/statuses/retweets_of_me") '(retweets_of_me))
-     ((string-match "^1/\\([^/]+\\)/lists/\\([^/]+\\)/statuses" method)
-      (let ((username (match-string-no-properties 1 method))
-	    (listname (match-string-no-properties 2 method)))
-	`(list ,username ,listname)))
-     (t nil)))
-   ((string= host twittering-api-search-host)
-    `(search ,word))
-   (t nil)))
-
 (defun twittering-add-timeline-history (spec-string)
   (when (or (null twittering-timeline-history)
 	    (not (string= spec-string (car twittering-timeline-history))))
@@ -1086,6 +2329,45 @@ referring the former ID."
 	   (setq result entry))))
      twittering-timeline-data-table)
     result))
+
+(defun twittering-delete-status-from-data-table (id)
+  (let ((modified-spec nil))
+    (maphash
+     (lambda (spec data)
+       (let* ((id-table (elt data 0))
+	      (referring-id-table (elt data 1))
+	      (timeline-data (elt data 2))
+	      (status (gethash id id-table)))
+	 (when status
+	   (remhash id id-table)
+	   ;; Here, `referring-id-table' is not modified.
+	   ;; Therefore, the retweet observed secondly will not appear even
+	   ;; if the retweet observed first for the same tweet is deleted.
+	   (setq modified-spec
+		 (cons `(,spec
+			 ,id-table
+			 ,referring-id-table
+			 ,(remove status timeline-data))
+		       modified-spec)))))
+     twittering-timeline-data-table)
+    (mapc
+     (lambda (data)
+       (let* ((spec (car data))
+	      (buffer (twittering-get-buffer-from-spec spec)))
+	 (puthash spec (cdr data) twittering-timeline-data-table)
+	 (when (buffer-live-p buffer)
+	   (with-current-buffer buffer
+	     (save-excursion
+	       (twittering-for-each-property-region
+		'id
+		(lambda (beg end value)
+		  (when (twittering-status-id= id value)
+		    (let ((buffer-read-only nil)
+			  (separator-pos (min (point-max) (1+ end))))
+		      (delete-region beg separator-pos)
+		      (goto-char beg))))
+		buffer))))))
+     modified-spec)))
 
 (defun twittering-get-replied-statuses (id &optional count)
   "Return a list of replied statuses starting from the status specified by ID.
@@ -1147,12 +2429,13 @@ Statuses are stored in ascending-order with respect to their IDs."
 			 (twittering-status-id< id2 id1))))))
 	  (puthash spec `(,id-table ,referring-id-table ,new-timeline-data)
 		   twittering-timeline-data-table))
-	(when twittering-jojo-mode
+	(when (twittering-jojo-mode-p spec)
 	  (mapc (lambda (status)
 		  (twittering-update-jojo (cdr (assq 'user-screen-name status))
 					  (cdr (assq 'text status))))
 		new-statuses))
 	(let ((twittering-new-tweets-spec spec)
+	      (twittering-new-tweets-statuses new-statuses)
 	      (twittering-new-tweets-count (length new-statuses)))
 	  (run-hooks 'twittering-new-tweets-hook))
 	new-statuses))))
@@ -1294,44 +2577,57 @@ The alist consists of pairs of field-name and field-value, such as
 ;;;
 
 (defvar twittering-buffer-info-list nil
-  "List of (buffer timeline-spec timeline-spec-string active-flag).")
+  "List of buffers managed by `twittering-mode'.")
 
 (defun twittering-get-buffer-list ()
   "Return buffers managed by `twittering-mode'."
   (twittering-unregister-killed-buffer)
-  (mapcar 'car twittering-buffer-info-list))
+  twittering-buffer-info-list)
 
 (defun twittering-get-active-buffer-list ()
   "Return active buffers managed by `twittering-mode', where statuses are
 retrieved periodically."
   (twittering-unregister-killed-buffer)
-  (remove nil (mapcar (lambda (entry) (when (elt entry 3) (car entry)))
-		      twittering-buffer-info-list)))
+  (remove nil
+	  (mapcar (lambda (buffer)
+		    (if (twittering-buffer-active-p buffer)
+			buffer
+		      nil))
+		  twittering-buffer-info-list)))
 
 (defun twittering-buffer-p (&optional buffer)
   "Return t if BUFFER is managed by `twittering-mode'.
 BUFFER defaults to the the current buffer."
   (let ((buffer (or buffer (current-buffer))))
-    (assq buffer twittering-buffer-info-list)))
+    (and (buffer-live-p buffer)
+	 (memq buffer twittering-buffer-info-list))))
 
 (defun twittering-buffer-active-p (&optional buffer)
   "Return t if BUFFER is an active buffer managed by `twittering-mode'.
 BUFFER defaults to the the current buffer."
-  (let* ((buffer (or buffer (current-buffer)))
-	 (entry (assq buffer twittering-buffer-info-list)))
-    (and entry (elt entry 3))))
+  (let ((buffer (or buffer (current-buffer))))
+    (and (twittering-buffer-p buffer)
+	 (with-current-buffer buffer
+	   twittering-active-mode))))
 
 (defun twittering-get-buffer-from-spec (spec)
   "Return the buffer bound to SPEC. If no buffers are bound to SPEC,
 return nil."
   (let* ((spec-string (twittering-timeline-spec-to-string spec))
-	 (spec ;; normalized spec
-	  (twittering-string-to-timeline-spec spec-string))
-	 (rest twittering-buffer-info-list))
-    (while (and rest (not (equal spec (elt (car rest) 1))))
-      (setq rest (cdr rest)))
-    (if rest
-	(elt (car rest) 0)
+	 (buffers
+	  (remove
+	   nil
+	   (mapcar
+	    (lambda (buffer)
+	      (if (twittering-equal-string-as-timeline
+		   spec-string
+		   (twittering-get-timeline-spec-string-for-buffer buffer))
+		  buffer
+		nil))
+	    (twittering-get-buffer-list)))))
+    (if buffers
+	;; We assume that the buffer with the same spec is unique.
+	(car buffers)
       nil)))
 
 (defun twittering-get-buffer-from-spec-string (spec-string)
@@ -1343,12 +2639,16 @@ return nil."
 (defun twittering-get-timeline-spec-for-buffer (buffer)
   "Return the timeline spec bound to BUFFER. If BUFFER is not managed by
 `twittering-mode', return nil."
-  (elt (assq buffer twittering-buffer-info-list) 1))
+  (when (twittering-buffer-p buffer)
+    (with-current-buffer buffer
+      twittering-timeline-spec)))
 
 (defun twittering-get-timeline-spec-string-for-buffer (buffer)
   "Return the timeline spec string bound to BUFFER. If BUFFER is not managed
 by `twittering-mode', return nil."
-  (elt (assq buffer twittering-buffer-info-list) 2))
+  (when (twittering-buffer-p buffer)
+    (with-current-buffer buffer
+      twittering-timeline-spec-string)))
 
 (defun twittering-current-timeline-spec ()
   "Return the timeline spec bound to the current buffer. If it is not managed
@@ -1360,37 +2660,22 @@ by `twittering-mode', return nil."
 managed by `twittering-mode', return nil."
   (twittering-get-timeline-spec-string-for-buffer (current-buffer)))
 
-(defun twittering-register-buffer (buffer spec-string &optional inactive)
-  "Register BUFFER to `twittering-buffer-info-list' as a buffer managed
-by `twittering-mode'. It is bound to SPEC-STRING. If INACTIVE is non-nil,
-BUFFER is regsitered as an inactive buffer.
-If BUFFER is the first managed buffer, call `twittering-start' to start
-timers."
-  (let ((spec (twittering-string-to-timeline-spec spec-string))
-	(buffer-list (twittering-get-active-buffer-list)))
-    (setq twittering-buffer-info-list
-	  (cons `(,buffer ,spec ,spec-string ,(not inactive))
-		twittering-buffer-info-list))
-    (when (null buffer-list)
-      (twittering-start))))
-
 (defun twittering-unregister-buffer (buffer &optional keep-timer)
   "Unregister BUFFER from `twittering-buffer-info-list'.
 If BUFFER is the last managed buffer and KEEP-TIMER is nil, call
 `twittering-stop' to stop timers."
-  (let ((entry (assq buffer twittering-buffer-info-list)))
-    (when entry
-      (setq twittering-buffer-info-list
-	    (delq entry twittering-buffer-info-list))
-      (when (null twittering-buffer-info-list)
-	(twittering-stop)))))
+  (when (memq buffer twittering-buffer-info-list)
+    (setq twittering-buffer-info-list
+	  (delq buffer twittering-buffer-info-list))
+    (when (and (null twittering-buffer-info-list)
+	       (not keep-timer))
+      (twittering-stop))))
 
 (defun twittering-unregister-killed-buffer ()
   "Unregister buffers which has been killed."
-  (mapc (lambda (entry)
-	  (let ((buffer (car entry)))
-	    (unless (buffer-live-p buffer)
-	      (twittering-unregister-buffer buffer))))
+  (mapc (lambda (buffer)
+	  (unless (buffer-live-p buffer)
+	    (twittering-unregister-buffer buffer)))
 	twittering-buffer-info-list))
 
 (defun twittering-replace-spec-string-for-buffer (buffer spec-string)
@@ -1401,10 +2686,9 @@ to the current one."
     (let ((current (twittering-get-timeline-spec-string-for-buffer buffer)))
       (when (and (not (string= current spec-string))
 		 (twittering-equal-string-as-timeline current spec-string))
-	(twittering-unregister-buffer buffer)
 	(with-current-buffer buffer
-	  (rename-buffer spec-string t))
-	(twittering-register-buffer buffer spec-string)))))
+	  (rename-buffer spec-string t)
+	  (setq twittering-timeline-spec-string spec-string))))))
 
 (defun twittering-set-active-flag-for-buffer (buffer active)
   "Set ACTIVE to active-flag for BUFFER."
@@ -1412,22 +2696,21 @@ to the current one."
     (let ((current (twittering-buffer-active-p buffer)))
       (when (or (and active (not current))
 		(and (not active) current))
-	(let ((spec-string
-	       (twittering-get-timeline-spec-string-for-buffer buffer)))
-	  (twittering-unregister-buffer buffer t)
-	  (twittering-register-buffer buffer spec-string (not active))
-	  (with-current-buffer buffer
-	    (twittering-update-mode-line)))))))
+	(twittering-toggle-activate-buffer buffer)))))
 
-(defun twittering-toggle-activate-buffer ()
+(defun twittering-toggle-activate-buffer (&optional buffer)
   "Toggle whether to retrieve timeline for the current buffer periodically."
   (interactive)
-  (when (twittering-buffer-p)
-    (cond
-     ((twittering-buffer-active-p)
-      (twittering-deactivate-buffer))
-     (t
-      (twittering-activate-buffer)))))
+  (let ((buffer (or buffer (current-buffer))))
+    (when (twittering-buffer-p buffer)
+      (with-current-buffer buffer
+	(let* ((new-mode (not twittering-active-mode))
+	       (active-buffer-list (twittering-get-active-buffer-list))
+	       (start-timer (and new-mode (null active-buffer-list))))
+	  (setq twittering-active-mode new-mode)
+	  (when start-timer
+	    (twittering-start))
+	  (twittering-update-mode-line))))))
 
 (defun twittering-activate-buffer (&optional buffer)
   "Activate BUFFER to retrieve timeline for it periodically."
@@ -1458,7 +2741,7 @@ SPEC may be a timeline spec or a timeline spec string."
 	 (spec-string (if (stringp spec)
 			  spec
 			(twittering-timeline-spec-to-string spec)))
-	 ;; `spec-string' without text properites is required because
+	 ;; `spec-string' without text properties is required because
 	 ;; Emacs21 displays `spec-string' with its properties on mode-line.
 	 ;; In addition, copying `spec-string' keeps timeline-data from
 	 ;; being modified by `minibuf-isearch.el'.
@@ -1476,13 +2759,47 @@ SPEC may be a timeline spec or a timeline spec string."
 	    (twittering-replace-spec-string-for-buffer buffer spec-string)
 	    (twittering-render-timeline buffer t)
 	    buffer)
-	(let ((buffer (generate-new-buffer spec-string)))
+	(let ((buffer (generate-new-buffer spec-string))
+	      (start-timer (null twittering-buffer-info-list)))
+	  (add-to-list 'twittering-buffer-info-list buffer t)
 	  (with-current-buffer buffer
-	    (twittering-mode-setup)
-	    (twittering-register-buffer buffer spec-string)
+	    (twittering-mode-setup spec-string)
 	    (twittering-render-timeline buffer)
-	    (twittering-get-and-render-timeline))
+	    (when (twittering-account-authorized-p)
+	      (when start-timer
+		;; If `buffer' is the first managed buffer,
+		;; call `twittering-start' to start timers.
+		(twittering-start))
+	      (unless (and start-timer twittering-active-mode)
+		;; If `buffer' is active and the first managed buffer,
+		;; `twittering-start' invokes
+		;; `twittering-get-and-render-timeline' indirectly.
+		;; Otherwise, `twittering-get-and-render-timeline' should be
+		;; invoked here.
+		(twittering-get-and-render-timeline))))
 	  buffer)))))
+
+(defun twittering-switch-to-next-timeline ()
+  (interactive)
+  (when (twittering-buffer-p)
+    (let* ((buffer-list (twittering-get-buffer-list))
+	   (following-buffers (cdr (memq (current-buffer) buffer-list)))
+	   (next (if following-buffers
+		     (car following-buffers)
+		   (car buffer-list))))
+      (unless (eq (current-buffer) next)
+	(switch-to-buffer next)))))
+
+(defun twittering-switch-to-previous-timeline ()
+  (interactive)
+  (when (twittering-buffer-p)
+    (let* ((buffer-list (reverse (twittering-get-buffer-list)))
+	   (preceding-buffers (cdr (memq (current-buffer) buffer-list)))
+	   (previous (if preceding-buffers
+			 (car preceding-buffers)
+		       (car buffer-list))))
+      (unless (eq (current-buffer) previous)
+	(switch-to-buffer previous)))))
 
 ;;;
 ;;; Unread statuses info
@@ -1526,7 +2843,7 @@ means the number of statuses retrieved after the last visiting of the buffer.")
   (let* ((buffer (twittering-get-buffer-from-spec twittering-new-tweets-spec))
 	 (current (or (cadr (assq buffer twittering-unread-status-info)) 0))
 	 (result (+ current twittering-new-tweets-count)))
-    (unless (eq buffer (current-buffer))
+    (when (and buffer (not (eq buffer (current-buffer))))
       (twittering-set-number-of-unread buffer result))))
 
 (defun twittering-enable-unread-status-notifier ()
@@ -1553,6 +2870,421 @@ means the number of statuses retrieved after the last visiting of the buffer.")
   (setq global-mode-string
 	(remove '(:eval (twittering-make-unread-status-notifier-string))
 		global-mode-string)))
+
+;;;
+;;; mode-line icon
+;;;
+
+;;; SSL
+(defconst twittering-ssl-indicator-image
+  (when (image-type-available-p 'xpm)
+    '(image :type xpm
+	    :ascent center
+	    :data
+	    "/* XPM */
+/*
+ * Copyright (C) 2003 Yuuichi Teranishi <teranisi@gohome.org>
+ * Copyright (C) 2003 Kazu Yamamoto <kazu@Mew.org>
+ * Copyright (C) 2004 Yoshifumi Nishida <nishida@csl.sony.co.jp>
+ * Copyright notice is the same as Mew's one.
+ */
+static char * yellow3_xpm[] = {
+\"14 14 7 1\",
+\" 	c None\",
+\".	c #B07403\",
+\"+	c #EFEE38\",
+\"@	c #603300\",
+\"#	c #D0A607\",
+\"$	c #FAFC90\",
+\"%	c #241100\",
+\"    .++++@    \",
+\"   .+@...+@   \",
+\"  .+@    .+@  \",
+\"  .+@    .+@  \",
+\"  .+@    .+@  \",
+\"++########@@@@\",
+\"+$$++++++++#@@\",
+\"+$++++%@+++#@@\",
+\"+$+++%%%@++#@@\",
+\"+$+++%%%@++#@@\",
+\"+$++++%@+++#@@\",
+\"+$++++%@+++#@@\",
+\"+$+++++++++#@@\",
+\"++@@@@@@@@@@@@\"};
+"
+;;; The above image is copied from `mew-lock.xpm' distributed with Mew.
+;;; The copyright of the image is below, which is copied from `mew.el'.
+
+;;; Copyright Notice:
+
+;; Copyright (C) 1994-2009 Mew developing team.
+;; All rights reserved.
+
+;; Redistribution and use in source and binary forms, with or without
+;; modification, are permitted provided that the following conditions
+;; are met:
+;;
+;; 1. Redistributions of source code must retain the above copyright
+;;    notice, this list of conditions and the following disclaimer.
+;; 2. Redistributions in binary form must reproduce the above copyright
+;;    notice, this list of conditions and the following disclaimer in the
+;;    documentation and/or other materials provided with the distribution.
+;; 3. Neither the name of the team nor the names of its contributors
+;;    may be used to endorse or promote products derived from this software
+;;    without specific prior written permission.
+;;
+;; THIS SOFTWARE IS PROVIDED BY THE TEAM AND CONTRIBUTORS ``AS IS'' AND
+;; ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+;; IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+;; PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE TEAM OR CONTRIBUTORS BE
+;; LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+;; CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+;; SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+;; BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+;; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+;; OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+;; IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+	    ))
+  "Image for indicator of SSL state.")
+
+(defconst twittering-modeline-ssl
+  (if twittering-ssl-indicator-image
+      (propertize "SSL"
+		  'display twittering-ssl-indicator-image
+		  'help-echo "SSL is enabled.")
+    "SSL"))
+
+;;; ACTIVE/INACTIVE
+(defconst twittering-active-indicator-image
+  (when (image-type-available-p 'xpm)
+    '(image :type xpm
+	    :ascent center
+	    :data
+	    "/* XPM */
+static char *plugged[] = {
+\"32 12 8 1\",
+\"  c None\",
+\". c #a6caf0\",
+\"# c #8fa5cf\",
+\"a c #717171\",
+\"b c #5d5d97\",
+\"c c #8488ca\",
+\"d c #9f9f9f\",
+\"e c #7f8080\",
+\"            ...                 \",
+\"           .ccb....             \",
+\"           accb####.            \",
+\"          .accb#####..          \",
+\"   eeeeeeeeaccb#####.eeeeeeee   \",
+\"   dddddddcaccb#####.dedddddd   \",
+\"   dddddddcaccb#####.dedddddd   \",
+\"   eeeeeeeeaccb#####.eeeeeeee   \",
+\"          aaccb####aaa          \",
+\"           accbaaaaa            \",
+\"           aaaaaaaa             \",
+\"            aaa                 \"
+};
+"))
+  "Image for indicator of active state."
+;;; The above image is copied from `plugged.xpm' distributed with Wanderlust
+;;; by Yuuichi Teranishi <teranisi@gohome.org>.
+;;; The copyright of the image is below, which is copied from `COPYING' of
+;;; Wanderlust 2.14.
+;; Copyright (C) 1998-2001 Yuuichi Teranishi <teranisi@gohome.org>
+;;
+;;    This program is free software; you can redistribute it and/or modify
+;;    it under the terms of the GNU General Public License as published by
+;;    the Free Software Foundation; either version 2, or (at your option)
+;;    any later version.
+;;
+;;    This program is distributed in the hope that it will be useful,
+;;    but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;    GNU General Public License for more details.
+;;
+;;    You should have received a copy of the GNU General Public License
+;;    along with GNU Emacs; see the file COPYING.  If not, write to the
+;;    Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+;;    Boston, MA 02111-1307, USA.
+)
+
+(defconst twittering-inactive-indicator-image
+  (when (image-type-available-p 'xpm)
+    '(image :type xpm
+	    :ascent center
+	    :data
+	    "/* XPM */
+static char * unplugged_xpm[] = {
+\"32 12 9 1\",
+\" 	s None	c None\",
+\".	c tomato\",
+\"X	c #a6caf0\",
+\"o	c #8488ca\",
+\"O	c #5d5d97\",
+\"+	c #8fa5cf\",
+\"@	c #717171\",
+\"#	c #7f8080\",
+\"$	c #9f9f9f\",
+\"          XXX......             \",
+\"           ...    ...           \",
+\"          ..O     ....X         \",
+\"         ..oO    ...+..XX       \",
+\"   ######.ooO   ...+++.X#####   \",
+\"   $$$$$o.ooO  ...@+++.X$#$$$   \",
+\"   $$$$$o.ooO ... @+++.X$#$$$   \",
+\"   ######.ooO...  @+++.X#####   \",
+\"         ..o...   @++..@@       \",
+\"          ....    @@..@         \",
+\"           ...    ...@          \",
+\"             ......             \"
+};
+"))
+  "Image for indicator of inactive state."
+;;; The above image is copied from `unplugged.xpm' distributed with Wanderlust
+;;; by Yuuichi Teranishi <teranisi@gohome.org>.
+;;; The copyright of the image is below, which is copied from `COPYING' of
+;;; Wanderlust 2.14.
+;; Copyright (C) 1998-2001 Yuuichi Teranishi <teranisi@gohome.org>
+;;
+;;    This program is free software; you can redistribute it and/or modify
+;;    it under the terms of the GNU General Public License as published by
+;;    the Free Software Foundation; either version 2, or (at your option)
+;;    any later version.
+;;
+;;    This program is distributed in the hope that it will be useful,
+;;    but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;    GNU General Public License for more details.
+;;
+;;    You should have received a copy of the GNU General Public License
+;;    along with GNU Emacs; see the file COPYING.  If not, write to the
+;;    Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+;;    Boston, MA 02111-1307, USA.
+)
+
+(let ((props
+       (when (display-mouse-p)
+	 `(local-map
+	   ,(purecopy (make-mode-line-mouse-map
+		       'mouse-2 #'twittering-toggle-activate-buffer))
+	   help-echo "mouse-2 toggles activate buffer"))))
+  (defconst twittering-modeline-active
+    (if twittering-active-indicator-image
+	(apply 'propertize " "
+	       `(display ,twittering-active-indicator-image ,@props))
+      " "))
+  (defconst twittering-modeline-inactive
+    (if twittering-inactive-indicator-image
+	(apply 'propertize "INACTIVE"
+	       `(display ,twittering-inactive-indicator-image ,@props))
+      "INACTIVE")))
+
+;;;
+;;; Account authorization
+;;;
+
+(defvar twittering-account-authorization nil
+  "State of account authorization for `twittering-username' and
+`twittering-password'.  The value is one of the following symbols:
+nil -- The account have not been authorized yet.
+queried -- The authorization has been queried, but not finished yet.
+authorized -- The account has been authorized.")
+
+(defun twittering-account-authorized-p ()
+  (eq twittering-account-authorization 'authorized))
+(defun twittering-account-authorization-queried-p ()
+  (eq twittering-account-authorization 'queried))
+
+(defun twittering-prepare-account-info ()
+  (when (memq twittering-auth-method '(basic xauth))
+    (unless (twittering-get-username)
+      (setq twittering-username (read-string "your twitter username: ")))
+    (unless (twittering-get-password)
+      (setq twittering-password
+	    (read-passwd (format "%s's twitter password: "
+				 twittering-username))))))
+
+(defun twittering-has-oauth-access-token-p ()
+  (let* ((required-entries '("oauth_token"
+			     "oauth_token_secret"
+			     "user_id"
+			     "screen_name"))
+	 (value-list
+	  (mapcar
+	   (lambda (key)
+	     (cdr (assoc key twittering-oauth-access-token-alist)))
+	   required-entries)))
+    (null (remove t (mapcar 'stringp value-list)))))
+
+(defun twittering-verify-credentials ()
+  (cond
+   ((or (twittering-account-authorized-p)
+	(twittering-account-authorization-queried-p))
+    nil)
+   ((and (memq twittering-auth-method '(oauth xauth))
+	 (or (null twittering-oauth-consumer-key)
+	     (null twittering-oauth-consumer-secret)))
+    (message "Consumer for OAuth is not specified.")
+    nil)
+   ((and twittering-use-master-password
+	 (not (twittering-capable-of-encryption-p)))
+    (message "You need GnuPG and (EasyPG or alpaca.el) for master password!")
+    nil)
+   ((and (memq twittering-auth-method '(oauth xauth))
+	 twittering-use-master-password
+	 (twittering-capable-of-encryption-p)
+	 (file-exists-p twittering-private-info-file))
+    (cond
+     ((and (twittering-load-private-info-with-guide)
+	   (twittering-has-oauth-access-token-p))
+      (message "The authorized token is loaded.")
+      (setq twittering-account-authorization 'queried)
+      (setq twittering-username
+	    (cdr (assoc "screen_name" twittering-oauth-access-token-alist)))
+      (let ((proc
+	     (twittering-call-api
+	      'verify-credentials
+	      `((sentinel
+		 . twittering-http-get-verify-credentials-sentinel)
+		(clean-up-sentinel
+		 . twittering-http-get-verify-credentials-clean-up-sentinel))
+	      )))
+	(cond
+	 ((null proc)
+	  (setq twittering-account-authorization nil)
+	  (message "Authorization failed. Type M-x twit to retry.")
+	  (setq twittering-oauth-access-token-alist nil))
+	 (t
+	  ;; wait for verification to finish.
+	  (while (twittering-account-authorization-queried-p)
+	    (sit-for 0.1))))))
+     (t
+      (message "Failed to load an authorized token from \"%s\"."
+	       twittering-private-info-file)
+      nil)))
+   ((eq twittering-auth-method 'oauth)
+    (let* ((scheme (if twittering-oauth-use-ssl
+		       "https"
+		     "http"))
+	   (request-token-url
+	    (concat scheme twittering-oauth-request-token-url-without-scheme))
+	   (access-token-url
+	    (concat scheme twittering-oauth-access-token-url-without-scheme))
+	   (token-alist
+	    (twittering-oauth-get-access-token
+	     request-token-url
+	     (lambda (token)
+	       (concat scheme
+		       twittering-oauth-authorization-url-base-without-scheme
+		       token))
+	     access-token-url
+	     twittering-oauth-consumer-key twittering-oauth-consumer-secret
+	     "twittering-mode")))
+      (cond
+       ((and (assoc "oauth_token" token-alist)
+	     (assoc "oauth_token_secret" token-alist)
+	     (assoc "screen_name" token-alist))
+	(let ((username (cdr (assoc "screen_name" token-alist))))
+	  (setq twittering-oauth-access-token-alist token-alist)
+	  (setq twittering-username username)
+	  (setq twittering-account-authorization 'authorized)
+	  (twittering-start)
+	  (message "Authorization for the account \"%s\" succeeded."
+		   username)
+	  (when (and twittering-use-master-password
+		     (twittering-capable-of-encryption-p)
+		     (not (file-exists-p twittering-private-info-file)))
+	    (twittering-save-private-info-with-guide))))
+       (t
+	(message "Authorization via OAuth failed. Type M-x twit to retry.")))))
+   ((eq twittering-auth-method 'xauth)
+    (twittering-prepare-account-info)
+    (let* ((scheme (if twittering-oauth-use-ssl
+		       "https"
+		     "http"))
+	   (access-token-url
+	    (concat scheme twittering-oauth-access-token-url-without-scheme))
+	   (token-alist
+	    (twittering-xauth-get-access-token
+	     access-token-url
+	     twittering-oauth-consumer-key twittering-oauth-consumer-secret
+	     (twittering-get-username)
+	     (twittering-get-password))))
+      ;; Dispose of password as recommended by Twitter.
+      ;; http://dev.twitter.com/pages/xauth
+      (setq twittering-password nil)
+      (cond
+       ((and token-alist
+	     (assoc "oauth_token" token-alist)
+	     (assoc "oauth_token_secret" token-alist))
+	(setq twittering-oauth-access-token-alist token-alist)
+	(setq twittering-account-authorization 'authorized)
+	(message "Authorization for the account \"%s\" succeeded."
+		 (twittering-get-username))
+	(when (and twittering-use-master-password
+		   (twittering-capable-of-encryption-p)
+		   (not (file-exists-p twittering-private-info-file)))
+	  (twittering-save-private-info-with-guide))
+	(twittering-start))
+       (t
+	(setq twittering-username nil)
+	(message "Authorization via xAuth failed. Type M-x twit to retry.")))))
+   ((eq twittering-auth-method 'basic)
+    (twittering-prepare-account-info)
+    (setq twittering-account-authorization 'queried)
+    (let ((proc
+	   (twittering-call-api
+	    'verify-credentials
+	    `((sentinel . twittering-http-get-verify-credentials-sentinel)
+	      (clean-up-sentinel
+	       . twittering-http-get-verify-credentials-clean-up-sentinel)))))
+      (cond
+       ((null proc)
+	(setq twittering-account-authorization nil)
+	(message "Authorization for the account \"%s\" failed. Type M-x twit to retry."
+		 (twittering-get-username))
+	(setq twittering-username nil)
+	(setq twittering-password nil))
+       (t
+	;; wait for verification to finish.
+	(while (twittering-account-authorization-queried-p)
+	  (sit-for 0.1))))))
+   (t
+    (message "%s is invalid as an authorization method."
+	     twittering-auth-method)))
+  (twittering-account-authorized-p))
+
+(defun twittering-http-get-verify-credentials-sentinel (header-info proc noninteractive &optional suc-msg)
+  (let ((status-line (cdr (assq 'status-line header-info)))
+	(status-code (cdr (assq 'status-code header-info))))
+    (case-string
+     status-code
+     (("200")
+      (setq twittering-account-authorization 'authorized)
+      (twittering-start)
+      (format "Authorization for the account \"%s\" succeeded."
+	      (twittering-get-username)))
+     (t
+      (setq twittering-account-authorization nil)
+      (let ((error-mes
+	     (format "Authorization for the account \"%s\" failed. Type M-x twit to retry."
+		     (twittering-get-username))))
+	(cond
+	 ((memq twittering-auth-method '(oauth xauth))
+	  (setq twittering-oauth-access-token-alist nil))
+	 ((eq twittering-auth-method 'basic)
+	  (setq twittering-username nil)
+	  (setq twittering-password nil)))
+	error-mes)))))
+
+(defun twittering-http-get-verify-credentials-clean-up-sentinel (proc noninteractive mes)
+  (let ((status (process-status proc)))
+    (when (and (memq status '(exit signal closed failed))
+	       (eq twittering-account-authorization 'queried))
+      (setq twittering-account-authorization nil)
+      (message "Authorization failed. Type M-x twit to retry.")
+      (setq twittering-username nil)
+      (setq twittering-password nil))))
 
 ;;;
 ;;; Debug mode
@@ -1594,23 +3326,29 @@ means the number of statuses retrieved after the last visiting of the buffer.")
     (let ((km twittering-mode-map))
       (define-key km (kbd "C-c C-f") 'twittering-friends-timeline)
       (define-key km (kbd "C-c C-r") 'twittering-replies-timeline)
-      (define-key km (kbd "C-c C-g") 'twittering-public-timeline)
       (define-key km (kbd "C-c C-u") 'twittering-user-timeline)
+      (define-key km (kbd "C-c C-d") 'twittering-direct-messages-timeline)
       (define-key km (kbd "C-c C-s") 'twittering-update-status-interactive)
       (define-key km (kbd "C-c C-e") 'twittering-erase-old-statuses)
       (define-key km (kbd "C-c C-m") 'twittering-retweet)
-      (define-key km (kbd "C-c C-h") 'twittering-set-current-hashtag)
+      (define-key km (kbd "C-c C-t") 'twittering-set-current-hashtag)
       (define-key km (kbd "C-m") 'twittering-enter)
       (define-key km (kbd "C-c C-l") 'twittering-update-lambda)
       (define-key km (kbd "<mouse-1>") 'twittering-click)
+      (define-key km (kbd "C-<down-mouse-3>") 'mouse-set-point)
+      (define-key km (kbd "C-<mouse-3>") 'twittering-push-tweet-onto-kill-ring)
       (define-key km (kbd "C-c C-v") 'twittering-view-user-page)
+      (define-key km (kbd "C-c D") 'twittering-delete-status)
       (define-key km (kbd "a") 'twittering-toggle-activate-buffer)
       (define-key km (kbd "g") 'twittering-current-timeline)
       (define-key km (kbd "u") 'twittering-update-status-interactive)
+      (define-key km (kbd "U") 'twittering-push-uri-onto-kill-ring)
       (define-key km (kbd "d") 'twittering-direct-message)
       (define-key km (kbd "v") 'twittering-other-user-timeline)
       (define-key km (kbd "V") 'twittering-visit-timeline)
       (define-key km (kbd "L") 'twittering-other-user-list-interactive)
+      (define-key km (kbd "f") 'twittering-switch-to-next-timeline)
+      (define-key km (kbd "b") 'twittering-switch-to-previous-timeline)
       ;; (define-key km (kbd "j") 'next-line)
       ;; (define-key km (kbd "k") 'previous-line)
       (define-key km (kbd "j") 'twittering-goto-next-status)
@@ -1639,6 +3377,16 @@ means the number of statuses retrieved after the last visiting of the buffer.")
       (define-key km (kbd "q") 'twittering-kill-buffer)
       (define-key km (kbd "C-c C-q") 'twittering-search)
       nil))
+
+(let ((km twittering-mode-menu-on-uri-map))
+  (when km
+    (define-key km [ct] '("Copy tweet" . twittering-push-tweet-onto-kill-ring))
+    (define-key km [cl] '("Copy link" . twittering-push-uri-onto-kill-ring))
+    (define-key km [ll] '("Load link" . twittering-click))
+    (let ((km-on-uri twittering-mode-on-uri-map))
+      (when km-on-uri
+	(define-key km-on-uri (kbd "C-<down-mouse-3>") 'mouse-set-point)
+	(define-key km-on-uri (kbd "C-<mouse-3>") km)))))
 
 (defun twittering-keybind-message ()
   (let ((important-commands
@@ -1670,67 +3418,85 @@ means the number of statuses retrieved after the last visiting of the buffer.")
   (modify-syntax-entry ?\" "w" twittering-mode-syntax-table)
   )
 
-(defun twittering-mode-init-global ()
-  "Initialize global variables for `twittering-mode'."
-  (defface twittering-username-face
-    `((t ,(append '(:underline t)
-		  (face-attr-construct
-		   (if (facep 'font-lock-string-face)
-		       'font-lock-string-face
-		     'bold)))))
-    "" :group 'faces)
-  (defface twittering-uri-face `((t (:underline t))) "" :group 'faces)
-  (twittering-update-status-format)
-  (setq twittering-username-active
-	(or twittering-username (read-string "your twitter username: ")))
-  (setq twittering-password-active
-	(or twittering-password (read-passwd "your twitter password: ")))
-  (when twittering-use-convert
-    (if (null twittering-convert-program)
-	(setq twittering-use-convert nil)
-      (with-temp-buffer
-	(call-process twittering-convert-program nil (current-buffer) nil
-		      "-version")
-	(goto-char (point-min))
-	(if (null (search-forward-regexp "\\(Image\\|Graphics\\)Magick" nil t))
-	    (setq twittering-use-convert nil)))))
-  (twittering-setup-proxy)
-  )
+(defun twittering-initialize-global-variables-if-necessary ()
+  "Initialize global variables for `twittering-mode' if they have not
+been initialized yet."
+  (unless twittering-initialized
+    (defface twittering-username-face
+      `((t ,(append '(:underline t)
+		    (face-attr-construct
+		     (if (facep 'font-lock-string-face)
+			 'font-lock-string-face
+		       'bold)))))
+      "" :group 'faces)
+    (defface twittering-uri-face `((t (:underline t))) "" :group 'faces)
+    (twittering-update-status-format)
+    (when twittering-use-convert
+      (if (null twittering-convert-program)
+	  (setq twittering-use-convert nil)
+	(with-temp-buffer
+	  (call-process twittering-convert-program nil (current-buffer) nil
+			"-version")
+	  (goto-char (point-min))
+	  (if (null (search-forward-regexp "\\(Image\\|Graphics\\)Magick"
+					   nil t))
+	      (setq twittering-use-convert nil)))))
+    (twittering-setup-proxy)
+    (setq twittering-initialized t)))
 
 (defvar twittering-mode-hook nil
   "Twittering-mode hook.")
 
 (defvar twittering-initialized nil)
 
-(defun twittering-mode-setup ()
+(defun twittering-mode-setup (spec-string)
+  "Set up the current buffer for `twittering-mode'."
   (kill-all-local-variables)
   (setq major-mode 'twittering-mode)
   (setq buffer-read-only t)
+  (buffer-disable-undo)
+  (setq mode-name "twittering-mode")
+  (setq mode-line-buffer-identification
+	`(,(default-value 'mode-line-buffer-identification)
+	  (:eval (twittering-mode-line-buffer-identification))))
 
   ;; Prevent `global-font-lock-mode' enabling `font-lock-mode'.
   ;; This technique is derived from `lisp/bs.el' distributed with Emacs 22.2.
   (make-local-variable 'font-lock-global-modes)
   (setq font-lock-global-modes '(not twittering-mode))
 
+  (make-local-variable 'twittering-timeline-spec)
+  (make-local-variable 'twittering-timeline-spec-string)
+  (make-local-variable 'twittering-active-mode)
   (make-local-variable 'twittering-icon-mode)
   (make-local-variable 'twittering-jojo-mode)
   (make-local-variable 'twittering-reverse-mode)
   (make-local-variable 'twittering-scroll-mode)
+
+  (setq twittering-timeline-spec-string spec-string)
+  (setq twittering-timeline-spec
+	(twittering-string-to-timeline-spec spec-string))
+  (setq twittering-active-mode t)
+
   (use-local-map twittering-mode-map)
   (twittering-update-mode-line)
   (set-syntax-table twittering-mode-syntax-table)
   (when (and (boundp 'font-lock-mode) font-lock-mode)
     (font-lock-mode -1))
+  (add-to-list 'twittering-buffer-info-list (current-buffer) t)
   (run-hooks 'twittering-mode-hook))
 
 (defun twittering-mode ()
   "Major mode for Twitter
 \\{twittering-mode-map}"
   (interactive)
-  (unless twittering-initialized
-    (twittering-mode-init-global)
-    (setq twittering-initialized t))
-  (twittering-visit-timeline twittering-initial-timeline-spec-string))
+  (let ((timeline-spec-list
+	 (if (listp twittering-initial-timeline-spec-string)
+	     twittering-initial-timeline-spec-string
+	   (cons twittering-initial-timeline-spec-string nil))))
+    (twittering-visit-timeline (car timeline-spec-list))
+    (when (twittering-account-authorized-p)
+      (mapc 'twittering-visit-timeline (cdr timeline-spec-list)))))
 
 ;;;
 ;;; Edit mode
@@ -1785,21 +3551,22 @@ means the number of statuses retrieved after the last visiting of the buffer.")
 
 (defun twittering-edit-extract-status ()
   (if (eq major-mode 'twittering-edit-mode)
-      (buffer-string)
+      (buffer-substring-no-properties (point-min) (point-max))
     ""))
 
 (defun twittering-edit-setup-help (&optional username spec)
   (let* ((item (if (twittering-timeline-spec-is-direct-messages-p spec)
 		   (format "a direct message to %s" username)
 		 "a tweet"))
-	 (help-str (format "Keymap:
-  C-c C-c: send %s
-  C-c C-k: cancel %s
-  M-n    : next history element
-  M-p    : previous history element
+	 (help-str (format (substitute-command-keys "Keymap:
+  \\[twittering-edit-post-status]: send %s
+  \\[twittering-edit-cancel-status]: cancel %s
+  \\[twittering-edit-next-history]: next history element
+  \\[twittering-edit-previous-history]: previous history element
+  \\[twittering-edit-replace-at-point]: shorten URL at point
 
 ---- text above this line is ignored ----
-" item item))
+") item item))
 	 (help-overlay
 	  (or twittering-help-overlay
 	      (make-overlay 1 1 nil nil nil))))
@@ -1847,31 +3614,33 @@ means the number of statuses retrieved after the last visiting of the buffer.")
       (message "Empty tweet!"))
      ((< 140 (length status))
       (message "Too long tweet!"))
-     (t
+     ((or (not twittering-request-confirmation-on-posting)
+	  (y-or-n-p "Send this tweet? "))
       (setq twittering-edit-history
 	    (cons status twittering-edit-history))
       (cond
        ((twittering-timeline-spec-is-direct-messages-p spec)
 	(if username
-	    (let ((parameters `(("user" . ,username)
-				("text" . ,status))))
-	      (twittering-http-post twittering-api-host "1/direct_messages/new"
-				    parameters))
+	    (twittering-call-api 'send-direct-message
+				 `((username . ,username)
+				   (status . ,status)))
 	  (message "No username specified")))
        (t
-	(let ((parameters `(("status" . ,status))))
+	(let ((as-reply
+	       (and reply-to-id
+		    (string-match
+		     (concat "\\`@" username "\\(?:[\n\r \t]+\\)*")
+		     status))))
 	  ;; Add in_reply_to_status_id only when a posting status
 	  ;; begins with @username.
-	  (when (and reply-to-id
-		     (string-match
-		      (concat "^@" username "\\(?:[\n\r \t]+\\)*")
-		      status))
-	    (add-to-list 'parameters
-			 `("in_reply_to_status_id" .
-			   ,(format "%s" reply-to-id))))
-	  (twittering-http-post twittering-api-host "1/statuses/update"
-				parameters))))
-      (twittering-edit-close)))))
+	  (twittering-call-api
+	   'update-status
+	   `((status . ,status)
+	     ,@(when as-reply
+		 `((in-reply-to-status-id . ,(format "%s" reply-to-id)))))))))
+      (twittering-edit-close))
+     (t
+      nil))))
 
 (defun twittering-edit-cancel-status ()
   (interactive)
@@ -1921,17 +3690,21 @@ means the number of statuses retrieved after the last visiting of the buffer.")
 ;;; Functions for URL library
 ;;;
 
+(defvar twittering-url-show-status t
+  "*Whether to show a running total of bytes transferred.")
 (defun twittering-url-wrapper (func &rest args)
   (let ((url-proxy-services
 	 (when twittering-proxy-use
-	   (let ((proxy-str (format "%s:%s" twittering-proxy-server
-				    twittering-proxy-port)))
-	     (if twittering-use-ssl
-		 `(("http" . ,proxy-str)
-		   ("https" . ,proxy-str))
-	       `(("http" . ,proxy-str))))))
-	(url-show-status nil))
-    (apply func args)))
+	   (twittering-url-proxy-services)))
+	(url-show-status twittering-url-show-status))
+    (if (eq func 'url-retrieve)
+	(let ((buffer (apply func args)))
+	  (when (buffer-live-p buffer)
+	    (with-current-buffer buffer
+	      (set (make-local-variable 'url-show-status)
+		   twittering-url-show-status)))
+	  buffer)
+      (apply func args))))
 
 (defun twittering-url-insert-file-contents (url)
   (twittering-url-wrapper 'url-insert-file-contents url))
@@ -1940,7 +3713,101 @@ means the number of statuses retrieved after the last visiting of the buffer.")
   (twittering-url-wrapper 'url-retrieve-synchronously url))
 
 ;;;
-;;; Basic HTTP functions
+;;; Asynchronous retrieval
+;;;
+
+(defvar twittering-url-data-hash (make-hash-table :test 'equal))
+(defvar twittering-url-request-list nil)
+(defvar twittering-url-request-sentinel-hash (make-hash-table :test 'equal))
+(defvar twittering-internal-url-queue nil)
+(defvar twittering-url-request-resolving-p nil)
+(defvar twittering-url-request-retry-limit 3)
+(defconst twittering-url-request-dummy-buffer-name
+  " *twittering-dummy-for-url-retrieve-async*")
+
+(defun twittering-remove-redundant-queries (queue)
+  (remove nil
+	  (mapcar
+	   (lambda (url)
+	     (let ((current (gethash url twittering-url-data-hash)))
+	       (when (or (null current)
+			 (and (integerp current)
+			      (< current twittering-url-request-retry-limit)))
+		 url)))
+	   (twittering-remove-duplicates queue))))
+
+(defun twittering-resolve-url-request ()
+  "Resolve requests of asynchronous URL retrieval."
+  (when (null twittering-url-request-resolving-p)
+    (setq twittering-url-request-resolving-p t)
+    ;; It is assumed that the following part is not processed
+    ;; in parallel.
+    (setq twittering-internal-url-queue
+	  (append twittering-internal-url-queue twittering-url-request-list))
+    (setq twittering-url-request-list nil)
+    (setq twittering-internal-url-queue
+	  (twittering-remove-redundant-queries twittering-internal-url-queue))
+    (if (null twittering-internal-url-queue)
+	(setq twittering-url-request-resolving-p nil)
+      (let ((url (car twittering-internal-url-queue))
+	    (coding-system-for-read 'binary)
+	    (require-final-newline nil))
+	(twittering-url-wrapper
+	 'url-retrieve
+	 url
+	 (lambda (&rest args)
+	   (let* ((status (if (< 21 emacs-major-version)
+			      (car args)
+			    nil))
+		  (callback-args (if (< 21 emacs-major-version)
+				     (cdr args)
+				   args))
+		  (url (elt callback-args 0)))
+	     (goto-char (point-min))
+	     (if (and (or (null status) (not (member :error status)))
+		      (search-forward-regexp "\r?\n\r?\n" nil t))
+		 (let ((body (buffer-substring (match-end 0) (point-max))))
+		   (puthash url body twittering-url-data-hash)
+		   (setq twittering-internal-url-queue
+			 (remove url twittering-internal-url-queue))
+		   (let ((sentinels
+			  (gethash url twittering-url-request-sentinel-hash)))
+		     (when sentinels
+		       (remhash url twittering-url-request-sentinel-hash)
+		       (mapc (lambda (func)
+			       (funcall func url body))
+			     sentinels))))
+	       (let ((current (gethash url twittering-url-data-hash)))
+		 (cond
+		  ((null current)
+		   (puthash url 1 twittering-url-data-hash))
+		  ((integerp current)
+		   (puthash url (1+ current) twittering-url-data-hash))
+		  (t
+		   nil))))
+	     (let ((current (current-buffer)))
+	       (set-buffer (get-buffer-create
+			    twittering-url-request-dummy-buffer-name))
+	       (kill-buffer current))
+	     (setq twittering-url-request-resolving-p nil)
+	     (twittering-resolve-url-request)))
+	 `(,url))))))
+
+(defun twittering-url-retrieve-async (url &optional sentinel)
+  "Retrieve URL asynchronously and call SENTINEL with the retrieved data.
+The request is placed at the last of queries queue. When the data has been
+retrieved, SENTINEL will be called as (funcall SENTINEL URL url-data).
+The retrieved data can be referred as (gethash url twittering-url-data-hash)."
+  (add-to-list 'twittering-url-request-list url t)
+  (when sentinel
+    (let ((current (gethash url twittering-url-request-sentinel-hash)))
+      (unless (member url current)
+	(puthash url (cons sentinel current)
+		 twittering-url-request-sentinel-hash))))
+  (twittering-resolve-url-request))
+
+;;;
+;;; Basic HTTP functions (for curl)
 ;;;
 
 (defun twittering-find-curl-program ()
@@ -1958,90 +3825,520 @@ means the number of statuses retrieved after the last visiting of the buffer.")
 
 (defun twittering-start-http-session-curl-p ()
   "Return t if curl was installed, otherwise nil."
-  (and (setq twittering-curl-program (twittering-find-curl-program))
-       t))
+  (unless twittering-curl-program
+    (setq twittering-curl-program (twittering-find-curl-program)))
+  (not (null twittering-curl-program)))
 
 (defun twittering-start-http-session-curl-https-p ()
   "Return t if curl was installed and the curl support HTTPS, otherwise nil."
-  (if twittering-curl-program
+  (when (twittering-start-http-session-curl-p)
+    (unless twittering-curl-program-https-capability
       (with-temp-buffer
 	(call-process twittering-curl-program
 		      nil (current-buffer) nil
 		      "--version")
 	(goto-char (point-min))
-	(and (search-forward-regexp "^Protocols: .*https" nil t)
-	     t))
-    nil))
+	(setq twittering-curl-program-https-capability
+	      (if (search-forward-regexp "^Protocols: .*https" nil t)
+		  'capable
+		'incapable))))
+    (eq twittering-curl-program-https-capability 'capable)))
 
-(defun twittering-lookup-http-start-function (order table)
-  "Decide a connection method from currently available methods."
-  (let ((rest order)
-	(result nil)
-	(msg-format "A function \"%s\" (referred from %s.%s) was not found"))
-    (while rest
+(defun twittering-send-http-request-curl (name buffer connection-info sentinel)
+  (let* ((request (cdr (assq 'request connection-info)))
+	 (method (cdr (assq 'method request)))
+	 (uri (cdr (assq 'uri request)))
+	 (header-list (cdr (assq 'header-list request)))
+	 (post-body (cdr (assq 'post-body request)))
+	 (use-proxy (cdr (assq 'use-proxy connection-info)))
+	 (proxy-server (cdr (assq 'proxy-server connection-info)))
+	 (proxy-port (cdr (assq 'proxy-port connection-info)))
+	 (proxy-user (cdr (assq 'proxy-user connection-info)))
+	 (proxy-password (cdr (assq 'proxy-password connection-info)))
+	 (use-ssl (cdr (assq 'use-ssl connection-info)))
+	 (allow-insecure-server-cert
+	  (cdr (assq 'allow-insecure-server-cert connection-info)))
+	 (cacert-fullpath (cdr (assq 'cacert-fullpath connection-info)))
+	 (cacert-dir (when cacert-fullpath
+		       (file-name-directory cacert-fullpath)))
+	 (cacert-filename (when cacert-fullpath
+			    (file-name-nondirectory cacert-fullpath)))
+	 (header-list
+	  `(,@header-list
+	    ;; Make `curl' remove the HTTP header field "Expect" for
+	    ;; avoiding '417 Expectation Failed' HTTP response error.
+	    ;; The header field is automatically added for a HTTP request
+	    ;; exceeding 1024 byte. See
+	    ;; http://d.hatena.ne.jp/imait/20091228/1262004813 and
+	    ;; http://www.escafrace.co.jp/blog/09/10/16/1008
+	    ("Expect" . "")))
+	 (curl-args
+	  `("--include" "--silent"
+	    ,@(apply 'append
+		     (mapcar
+		      (lambda (pair)
+			;; Do not overwrite internal headers `curl' would use.
+			;; Thanks to William Xu.
+			;; "cURL - How To Use"
+			;; http://curl.haxx.se/docs/manpage.html
+			(unless (string= (car pair) "Host")
+			  `("-H" ,(format "%s: %s" (car pair) (cdr pair)))))
+		      header-list))
+	    ,@(when use-ssl `("--cacert" ,cacert-filename))
+	    ,@(when (and use-ssl allow-insecure-server-cert)
+		`("--insecure"))
+	    ,@(when (and use-proxy proxy-server proxy-port)
+		(append
+		 `("-x" ,(format "%s:%s" proxy-server proxy-port))
+		 (when (and proxy-user proxy-password)
+		   `("-U" ,(format "%s:%s" proxy-user proxy-password)))))
+	    ,@(when (string= "POST" method)
+		`("-d" ,(or post-body "")))
+	    ,uri))
+	 (coding-system-for-read 'binary)
+	 (coding-system-for-write 'binary)
+	 (default-directory
+	   ;; If `use-ssl' is non-nil, the `curl' process
+	   ;; is executed at the same directory as the temporary cert file.
+	   ;; Without changing directory, `curl' misses the cert file if
+	   ;; you use Emacs on Cygwin because the path on Emacs differs
+	   ;; from Windows.
+	   ;; With changing directory, `curl' on Windows can find the cert
+	   ;; file if you use Emacs on Cygwin.
+	   (if use-ssl
+	       cacert-dir
+	     default-directory))
+	 (proc (apply 'start-process name buffer
+		      twittering-curl-program curl-args)))
+    (when (and proc (functionp sentinel))
+      (set-process-sentinel proc sentinel))
+    proc))
+
+(defun twittering-pre-process-buffer-curl (proc buffer connection-info)
+  (let ((use-ssl (cdr (assq 'use-ssl connection-info)))
+	(use-proxy (cdr (assq 'use-proxy connection-info))))
+    (when (and use-ssl use-proxy)
+      ;; When using SSL via a proxy with CONNECT method,
+      ;; omit a successful HTTP response and headers if they seem to be
+      ;; sent from the proxy.
+      (with-current-buffer buffer
+	(save-excursion
+	  (goto-char (point-min))
+	  (let ((first-regexp
+		 ;; successful HTTP response
+		 "\\`HTTP/1\.[01] 2[0-9][0-9] .*?\r?\n")
+		(next-regexp
+		 ;; following HTTP response
+		 "^\\(\r?\n\\)HTTP/1\.[01] [0-9][0-9][0-9] .*?\r?\n"))
+	    (when (and (search-forward-regexp first-regexp nil t)
+		       (search-forward-regexp next-regexp nil t))
+	      (let ((beg (point-min))
+		    (end (match-end 1)))
+		(delete-region beg end)))))))))
+
+;;;
+;;; Basic HTTP functions (for wget)
+;;;
+
+(defun twittering-find-wget-program ()
+  "Returns an appropriate `wget' program pathname or nil if not found."
+  (executable-find "wget"))
+
+(defun twittering-start-http-session-wget-p ()
+  "Return t if `wget' was installed, otherwise nil."
+  (unless twittering-wget-program
+    (setq twittering-wget-program (twittering-find-wget-program)))
+  (not (null twittering-wget-program)))
+
+(defun twittering-send-http-request-wget (name buffer connection-info sentinel)
+  (let* ((request (cdr (assq 'request connection-info)))
+	 (method (cdr (assq 'method request)))
+	 (scheme (cdr (assq 'scheme request)))
+	 (uri (cdr (assq 'uri request)))
+	 (header-list (cdr (assq 'header-list request)))
+	 (post-body (cdr (assq 'post-body request)))
+	 (use-proxy (cdr (assq 'use-proxy connection-info)))
+	 (proxy-server (cdr (assq 'proxy-server connection-info)))
+	 (proxy-port (cdr (assq 'proxy-port connection-info)))
+	 (proxy-user (cdr (assq 'proxy-user connection-info)))
+	 (proxy-password (cdr (assq 'proxy-password connection-info)))
+	 (use-ssl (cdr (assq 'use-ssl connection-info)))
+	 (allow-insecure-server-cert
+	  (cdr (assq 'allow-insecure-server-cert connection-info)))
+	 (cacert-fullpath (cdr (assq 'cacert-fullpath connection-info)))
+	 (cacert-dir (when cacert-fullpath
+		       (file-name-directory cacert-fullpath)))
+	 (cacert-filename (when cacert-fullpath
+			    (file-name-nondirectory cacert-fullpath)))
+	 (args
+	  `("--save-headers"
+	    "--quiet"
+	    "--output-document=-"
+	    ,@(remove nil
+		      (mapcar
+		       (lambda (pair)
+			 (unless (string= (car pair) "Host")
+			   (format "--header=%s: %s" (car pair) (cdr pair))))
+		       header-list))
+	    ,@(when use-ssl
+		`(,(format "--ca-certificate=%s" cacert-filename)))
+	    ,@(when (and use-ssl allow-insecure-server-cert)
+		`("--no-check-certificate"))
+	    ,@(cond
+	       ((not use-proxy)
+		'("--no-proxy"))
+	       ((and use-proxy proxy-server proxy-port
+		     proxy-user proxy-password)
+		`(,(format "--proxy-user=%s" proxy-user)
+		  ,(format "--proxy-password=%s" proxy-password)))
+	       (t
+		nil))
+	    ,@(when (string= "POST" method)
+		`(,(concat "--post-data=" (or post-body ""))))
+	    ,uri))
+	 (coding-system-for-read 'binary)
+	 (coding-system-for-write 'binary)
+	 (default-directory
+	   ;; If `use-ssl' is non-nil, the `wget' process
+	   ;; is executed at the same directory as the temporary cert file.
+	   ;; Without changing directory, `wget' misses the cert file if
+	   ;; you use Emacs on Cygwin because the path on Emacs differs
+	   ;; from Windows.
+	   ;; With changing directory, `wget' on Windows can find the cert
+	   ;; file if you use Emacs on Cygwin.
+	   (if use-ssl
+	       cacert-dir
+	     default-directory))
+	 (process-environment
+	  `(,@(when (and use-proxy proxy-server proxy-port)
+		`(,(format "%s_proxy=%s://%s:%s/" scheme
+			   scheme proxy-server proxy-port)))
+	    ,@process-environment))
+	 (proc
+	  (apply 'start-process name buffer twittering-wget-program args)))
+    (when (and proc (functionp sentinel))
+      (set-process-sentinel proc sentinel))
+    proc))
+
+(defun twittering-pre-process-buffer-wget (proc buffer connection-info)
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (when (search-forward-regexp "\\`[^\n]*?\r\r\n" (point-max) t)
+	;; When `wget.exe' writes HTTP response in text mode,
+	;; CRLF may be converted into CRCRLF.
+	(goto-char (point-min))
+	(while (search-forward "\r\n" nil t)
+	  (replace-match "\n" nil t)))
+      (goto-char (point-max))
+      (when (search-backward-regexp "\nProcess [^\n]* finished\n\\'"
+				    (point-min) t)
+	(replace-match "" nil t))
+      )))
+
+;;;
+;;; Basic HTTP functions (general)
+;;;
+
+(defun twittering-lookup-connection-type (use-ssl &optional order table)
+  "Return available entry extracted fron connection type table.
+TABLE is connection type table, which is an alist of type symbol and its
+item alist, such as
+ '((native (check . t)
+           (https . twittering-start-http-session-native-tls-p)
+           (start . twittering-start-http-session-native))
+   (curl (check . twittering-start-http-session-curl-p)
+         (https . twittering-start-http-session-curl-https-p)
+         (start . twittering-start-http-session-curl))) .
+ORDER means the priority order of type symbols.
+If USE-SSL is nil, the item `https' is ignored.
+When the type `curl' has priority and is available for the above table,
+the function returns
+ '((check . twittering-start-http-session-curl-p)
+   (https . twittering-start-http-session-curl-https-p)
+   (start . twittering-start-http-session-curl)) ."
+  (let ((rest (or order twittering-connection-type-order))
+	(table (or table twittering-connection-type-table))
+	(result nil))
+    (while (and rest (null result))
       (let* ((candidate (car rest))
-	     (entry (assq candidate table))
-	     (entry-sym (car-safe entry))
-	     (check-func (cdr (assq 'check entry)))
-	     (https-func (if twittering-use-ssl
-			     (cdr (assq 'https entry))
-			   ;; Ignore `https' when `twittering-use-ssl' is nil.
-			   t))
-	     (start-func (cdr (assq 'start entry))))
-	(if (and (cond
-		  ((null check-func) nil)
-		  ((eq t check-func) t)
-		  ((functionp check-func) (funcall check-func))
-		  (t (message msg-format check-func entry-sym 'check)
-		     (error msg-format check-func entry-sym 'check)))
-		 (cond
-		  ((null https-func) nil)
-		  ((eq t https-func) t)
-		  ((functionp https-func) (funcall https-func))
-		  (t (message msg-format https-func entry-sym 'https)
-		     (error msg-format https-func entry-sym 'https)))
-		 (cond
-		  ((functionp start-func) t)
-		  (t (message msg-format start-func entry-sym 'start)
-		     (error msg-format start-func entry-sym 'start))))
-	    (setq result start-func
-		  rest nil)
-	  (setq rest (cdr rest)))))
-    (unless result
-      (if twittering-use-ssl
-	  ;; Fall back on connection without SSL.
-	  (when (yes-or-no-p "HTTPS(SSL) is not available because your 'cURL' cannot use HTTPS. Use HTTP instead? ")
-	    (setq twittering-use-ssl nil)
-	    (twittering-update-mode-line)
-	    (setq result (twittering-lookup-http-start-function order table)))
-	(message "All connection methods are unavailable.")))
+	     (entry (cdr (assq candidate table)))
+	     (validate (lambda (item)
+			 (let ((v (cdr (assq item entry))))
+			   (or (null v) (eq t v) (functionp v)))))
+	     (confirm (lambda (item)
+			(let ((v (cdr (assq item entry))))
+			  (cond
+			   ((null v) nil)
+			   ((eq t v) t)
+			   ((functionp v) (funcall v)))))))
+	(if (and (funcall validate 'check)
+		 (or (not use-ssl) (funcall validate 'https)))
+	    (cond
+	     ((and (funcall confirm 'check)
+		   (or (not use-ssl) (funcall confirm 'https)))
+	      (setq rest nil)
+	      (setq result entry))
+	     (t
+	      (setq rest (cdr rest))))
+	  (message "The configuration for conncetion type `%s' is invalid."
+		   candidate)
+	  (setq rest nil))))
     result))
 
-(defun twittering-start-http-session (method headers host port path parameters &optional noninteractive sentinel)
+(defun twittering-lookup-http-start-function (&optional order table)
+  "Decide a connection method from currently available methods."
+  (let ((entry
+	 (twittering-lookup-connection-type twittering-use-ssl order table)))
+    (cdr (assq 'send-http-request entry))))
+
+(defun twittering-ensure-connection-method (&optional order table)
+  "Ensure a connection method with a compromise.
+Return nil if no connection methods are available with a compromise."
+  (let* ((use-ssl (or twittering-use-ssl twittering-oauth-use-ssl))
+	 (entry (twittering-lookup-connection-type use-ssl order table)))
+    (cond
+     (entry
+      t)
+     ((and (null entry) use-ssl
+	   (yes-or-no-p "HTTPS(SSL) is unavailable. Use HTTP instead? "))
+      ;; Fall back on connection without SSL.
+      (setq twittering-use-ssl nil)
+      (setq twittering-oauth-use-ssl nil)
+      (twittering-update-mode-line)
+      (twittering-ensure-connection-method order table)
+      t)
+     (t
+      nil))))
+
+(defun twittering-make-http-request (method header-list host port path query-parameters post-body use-ssl)
+  "Returns an alist specifying a HTTP request.
+METHOD specifies HTTP method. It must be \"GET\" or \"POST\".
+HEADER-LIST is a list of (field-name . field-value) specifying HTTP header
+fields. The fields \"Host\", \"User-Agent\" and \"Content-Length\" are
+automatically filled if necessary.
+HOST specifies the host.
+PORT specifies the port. This must be an integer.
+PATH specifies the absolute path in URI (without query string).
+QUERY-PARAMTERS is a string or an alist.
+If QUERY-PARAMTERS is a string, it is treated as an encoded query string.
+If QUERY-PARAMTERS is an alist, it represents a list of cons pairs of
+string, (query-key . query-value).
+POST-BODY specifies the post body sent when METHOD equals to \"POST\".
+If POST-BODY is nil, no body is posted.
+If USE-SSL is non-nil, the request is performed with SSL.
+
+The result alist includes the following keys, where a key is a symbol.
+  method: HTTP method such as \"GET\" or \"POST\".
+  scheme: the scheme name. \"http\" or \"https\".
+  host: the host to which the request is sent.
+  port: the port to which the request is sent (integer).
+  path: the absolute path string. Note that it does not include query string.
+  query-string: the query string.
+  uri: the URI. It includes the query string.
+  header-list: an alist specifying pairs of a parameter and its value in HTTP
+    header field.
+  post-body: the entity that will be posted."
+  (let* ((scheme (if use-ssl "https" "http"))
+	 (default-port (if use-ssl 443 80))
+	 (port (if port port default-port))
+	 (query-string
+	  (cond
+	   ((stringp query-parameters)
+	    query-parameters)
+	   ((consp query-parameters)
+	    (mapconcat (lambda (pair)
+			 (cond
+			  ((stringp pair)
+			   (twittering-percent-encode pair))
+			  ((consp pair)
+			   (format
+			    "%s=%s"
+			    (twittering-percent-encode (car pair))
+			    (twittering-percent-encode (cdr pair))))
+			  (t
+			   nil)))
+		       query-parameters
+		       "&"))
+	   (t
+	    nil)))
+	 (uri (concat scheme "://"
+		      host
+		      (when (and port (not (= port default-port)))
+			(format ":%d" port))
+		      path
+		      (when query-string
+			(concat "?" query-string))))
+	 (header-list
+	  `(,@(when (and (string= method "POST")
+			 (not (assoc "Content-Length" header-list)))
+		`(("Content-Length" . ,(format "%d" (length post-body)))))
+	    ,@(unless (assoc "Host" header-list)
+		`(("Host" . ,host)))
+	    ,@(unless (assoc "User-Agent" header-list)
+		`(("User-Agent" . ,(twittering-user-agent))))
+	    ,@header-list)))
+    `((method . ,method)
+      (scheme . ,scheme)
+      (host . ,host)
+      (port . ,port)
+      (path . ,path)
+      (query-string . ,query-string)
+      (uri . ,uri)
+      (header-list . ,header-list)
+      (post-body . ,post-body))))
+
+(defun twittering-make-http-request-from-uri (method header-list uri &optional post-body)
+  "Returns an alist specifying a HTTP request.
+The result alist has the same form as an alist generated by
+`twittering-make-http-request'.
+
+METHOD specifies HTTP method. It must be \"GET\" or \"POST\".
+HEADER-LIST is a list of (field-name . field-value) specifying HTTP header
+fields. The fields \"Host\" and \"User-Agent\" are automatically filled
+if necessary.
+URI specifies the URI including query string.
+POST-BODY specifies the post body sent when METHOD equals to \"POST\".
+If POST-BODY is nil, no body is posted."
+  (let* ((parts-alist
+	  (let ((parsed-url (url-generic-parse-url uri)))
+	    ;; This is required for the difference of url library
+	    ;; distributed with Emacs 22 and 23.
+	    (cond
+	     ((and (fboundp 'url-p) (url-p parsed-url))
+	      ;; Emacs 23 and later.
+	      `((scheme . ,(url-type parsed-url))
+		(host . ,(url-host parsed-url))
+		(port . ,(url-portspec parsed-url))
+		(path . ,(url-filename parsed-url))))
+	     ((vectorp parsed-url)
+	      ;; Emacs 22.
+	      `((scheme . ,(aref parsed-url 0))
+		(host . ,(aref parsed-url 3))
+		(port . ,(aref parsed-url 4))
+		(path . ,(aref parsed-url 5))))
+	     (t
+	      nil))))
+	 (path (let ((path (cdr (assq 'path parts-alist))))
+		 (if (string-match "\\`\\(.*\\)\\?" path)
+		     (match-string 1 path)
+		   path)))
+	 (query-string (let ((path (cdr (assq 'path parts-alist))))
+			 (if (string-match "\\?\\(.*\\)\\'" path)
+			     (match-string 1 path)
+			   nil))))
+    (twittering-make-http-request method header-list
+				  (cdr (assq 'host parts-alist))
+				  (cdr (assq 'port parts-alist))
+				  path
+				  query-string
+				  post-body
+				  (string= "https"
+					   (cdr (assq 'scheme parts-alist))))))
+
+(defun twittering-make-connection-info (request &optional additional order table)
+  "Make an alist specifying the information of connection for REQUEST.
+REQUEST must be an alist that has the same keys as that generated by
+`twittering-make-http-request'.
+
+ADDITIONAL is appended to the tail of the result alist.
+Following ADDITIONAL, an entry in TABLE is also appended to the result alist,
+where `twittering-lookup-connection-type' determines the entry according to
+the priority order ORDER.
+If ORDER is nil, `twittering-connection-type-order' is used in place of ORDER.
+If TABLE is nil, `twittering-connection-type-table' is used in place of TABLE.
+
+The parameter symbols are following:
+  use-ssl: whether SSL is enabled or not.
+  allow-insecure-server-cert: non-nil if an insecure server certificate is
+    allowed on SSL.
+  cacert-fullpath: the full-path of the certificate authorizing a server
+    certificate on SSL.
+  use-proxy: non-nil if using a proxy.
+  proxy-server: a proxy server or nil.
+  proxy-port: a port for connecting the proxy (integer) or nil.
+  proxy-user: a username for connecting the proxy or nil.
+  proxy-password: a password for connecting the proxy or nil.
+  request: an alist specifying a HTTP request."
+  (let* ((order (or order twittering-connection-type-order))
+	 (table (or table twittering-connection-type-table))
+	 (scheme (cdr (assq 'scheme request)))
+	 (use-ssl (string= "https" scheme))
+	 (entry (twittering-lookup-connection-type use-ssl order table)))
+    `((use-ssl . ,use-ssl)
+      (allow-insecure-server-cert
+       . ,twittering-allow-insecure-server-cert)
+      (cacert-fullpath
+       . ,(when use-ssl (twittering-ensure-ca-cert)))
+      (use-proxy . ,twittering-proxy-use)
+      ,@(when twittering-proxy-use
+	  `((proxy-server . ,(twittering-proxy-info scheme 'server))
+	    (proxy-port . ,(twittering-proxy-info scheme 'port))
+	    (proxy-user . ,(if use-ssl
+			       twittering-https-proxy-user
+			     twittering-http-proxy-user))
+	    (proxy-password . ,(if use-ssl
+				   twittering-https-proxy-password
+				 twittering-http-proxy-password))))
+      (request . ,request)
+      ,@additional
+      ,@entry)))
+
+(defun twittering-send-http-request (request additional-info sentinel &optional order table)
+  "Open a connection and return a subprocess object for the connection.
+REQUEST must be an alist that has the same keys as that generated by
+`twittering-make-http-request'.
+SENTINEL is called as a function when the process changes state.
+It gets three arguments: the process, a string describing the change, and
+the connection-info, which is generated by `twittering-make-connection-info'
+and also includes an alist ADDITIONAL-INFO.
+
+How to perform the request is selected from TABLE according to the priority
+order ORDER. ORDER and TABLE are directly sent to
+`twittering-make-connection-info'.
+If ORDER is nil, `twittering-connection-type-order' is used in place of ORDER.
+If TABLE is nil, `twittering-connection-type-table' is used in place of TABLE.
+"
+  (let* ((order (or order twittering-connection-type-order))
+	 (table (or table twittering-connection-type-table))
+	 (connection-info
+	  (twittering-make-connection-info request additional-info
+					   order table))
+	 (func (cdr (assq 'send-http-request connection-info)))
+	 (temp-buffer (generate-new-buffer "*twmode-http-buffer*")))
+    (when (and func (functionp func))
+      (funcall func "*twmode-generic*" temp-buffer
+	       connection-info
+	       (when (and sentinel (functionp sentinel))
+		 (lexical-let ((sentinel sentinel)
+			       (connection-info connection-info))
+		   (lambda (proc status)
+		     (apply sentinel proc status connection-info nil))))))))
+
+(defun twittering-start-http-session (method headers host port path parameters &optional noninteractive sentinel clean-up-sentinel)
   "METHOD    : http method
-HEADERS   : http request heades in assoc list
+HEADERS   : http request headers in assoc list
 HOST      : remote host name
 PORT      : destination port number. nil means default port (http: 80, https: 443)
 PATH      : http request path
-PARAMETERS: http request parameters (query string)"
+PARAMETERS: http request parameters (query string)
+NONINTERACTIVE: non-nil if this is called in noninteractive way.
+SENTINEL  : sentinel executed if HTTP response is valid.
+CLEAN-UP-SENTINEL: sentinel always executed."
   (unless (member method '("POST" "GET"))
     (error "Unknown HTTP method: %s" method))
   (unless (string-match "^/" path)
     (error "Invalid HTTP path: %s" path))
-
-  (unless (assoc "Host" headers)
-    (setq headers (cons `("Host" . ,host) headers)))
-  (unless (assoc "User-Agent" headers)
-    (setq headers (cons `("User-Agent" . ,(twittering-user-agent))
-			headers)))
-
-  (let ((func (twittering-lookup-http-start-function
-	       twittering-connection-type-order
-	       twittering-connection-type-table)))
-    (if (and func (fboundp func))
-	(funcall func method headers host port path parameters
-		 noninteractive sentinel)
-      nil)))
+  (let* ((post-body "")
+	 (request
+	  (twittering-make-http-request method headers host port path
+					parameters post-body
+					twittering-use-ssl))
+	 (additional-info `((noninteractive . ,noninteractive)
+			    (clean-up-sentinel . ,clean-up-sentinel)
+			    (sentinel . ,sentinel))))
+    (twittering-send-http-request request additional-info
+				  #'twittering-http-default-sentinel)))
 
 (defvar twittering-cert-file nil)
 
@@ -2052,197 +4349,165 @@ PARAMETERS: http request parameters (query string)"
     (setq twittering-cert-file nil)))
 
 ;;; FIXME: file name is hard-coded. More robust way is desired.
+;;; https://www.geotrust.com/resources/root_certificates/certificates/Equifax_Secure_Certificate_Authority.cer
 (defun twittering-ensure-ca-cert ()
   "Create a CA certificate file if it does not exist, and return
-its file name."
+its file name. The certificate is retrieved from
+`https://www.geotrust.com/resources/root_certificates/certificates/Equifax_Secure_Certificate_Authority.cer'."
   (if twittering-cert-file
       twittering-cert-file
     (let ((file-name (make-temp-file "twmode-cacert")))
       (with-temp-file file-name
 	(insert "-----BEGIN CERTIFICATE-----
-MIICkDCCAfmgAwIBAgIBATANBgkqhkiG9w0BAQQFADBaMQswCQYDVQQGEwJVUzEc
-MBoGA1UEChMTRXF1aWZheCBTZWN1cmUgSW5jLjEtMCsGA1UEAxMkRXF1aWZheCBT
-ZWN1cmUgR2xvYmFsIGVCdXNpbmVzcyBDQS0xMB4XDTk5MDYyMTA0MDAwMFoXDTIw
-MDYyMTA0MDAwMFowWjELMAkGA1UEBhMCVVMxHDAaBgNVBAoTE0VxdWlmYXggU2Vj
-dXJlIEluYy4xLTArBgNVBAMTJEVxdWlmYXggU2VjdXJlIEdsb2JhbCBlQnVzaW5l
-c3MgQ0EtMTCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEAuucXkAJlsTRVPEnC
-UdXfp9E3j9HngXNBUmCbnaEXJnitx7HoJpQytd4zjTov2/KaelpzmKNc6fuKcxtc
-58O/gGzNqfTWK8D3+ZmqY6KxRwIP1ORROhI8bIpaVIRw28HFkM9yRcuoWcDNM50/
-o5brhTMhHD4ePmBudpxnhcXIw2ECAwEAAaNmMGQwEQYJYIZIAYb4QgEBBAQDAgAH
-MA8GA1UdEwEB/wQFMAMBAf8wHwYDVR0jBBgwFoAUvqigdHJQa0S3ySPY+6j/s1dr
-aGwwHQYDVR0OBBYEFL6ooHRyUGtEt8kj2Puo/7NXa2hsMA0GCSqGSIb3DQEBBAUA
-A4GBADDiAVGqx+pf2rnQZQ8w1j7aDRRJbpGTJxQx78T3LUX47Me/okENI7SS+RkA
-Z70Br83gcfxaz2TE4JaY0KNA4gGK7ycH8WUBikQtBmV1UsCGECAhX2xrD2yuCRyv
-8qIYNMR1pHMc8Y3c7635s3a0kr/clRAevsvIO1qEYBlWlKlV
------END CERTIFICATE-----"))
+MIIDIDCCAomgAwIBAgIENd70zzANBgkqhkiG9w0BAQUFADBOMQswCQYDVQQGEwJV
+UzEQMA4GA1UEChMHRXF1aWZheDEtMCsGA1UECxMkRXF1aWZheCBTZWN1cmUgQ2Vy
+dGlmaWNhdGUgQXV0aG9yaXR5MB4XDTk4MDgyMjE2NDE1MVoXDTE4MDgyMjE2NDE1
+MVowTjELMAkGA1UEBhMCVVMxEDAOBgNVBAoTB0VxdWlmYXgxLTArBgNVBAsTJEVx
+dWlmYXggU2VjdXJlIENlcnRpZmljYXRlIEF1dGhvcml0eTCBnzANBgkqhkiG9w0B
+AQEFAAOBjQAwgYkCgYEAwV2xWGcIYu6gmi0fCG2RFGiYCh7+2gRvE4RiIcPRfM6f
+BeC4AfBONOziipUEZKzxa1NfBbPLZ4C/QgKO/t0BCezhABRP/PvwDN1Dulsr4R+A
+cJkVV5MW8Q+XarfCaCMczE1ZMKxRHjuvK9buY0V7xdlfUNLjUA86iOe/FP3gx7kC
+AwEAAaOCAQkwggEFMHAGA1UdHwRpMGcwZaBjoGGkXzBdMQswCQYDVQQGEwJVUzEQ
+MA4GA1UEChMHRXF1aWZheDEtMCsGA1UECxMkRXF1aWZheCBTZWN1cmUgQ2VydGlm
+aWNhdGUgQXV0aG9yaXR5MQ0wCwYDVQQDEwRDUkwxMBoGA1UdEAQTMBGBDzIwMTgw
+ODIyMTY0MTUxWjALBgNVHQ8EBAMCAQYwHwYDVR0jBBgwFoAUSOZo+SvSspXXR9gj
+IBBPM5iQn9QwHQYDVR0OBBYEFEjmaPkr0rKV10fYIyAQTzOYkJ/UMAwGA1UdEwQF
+MAMBAf8wGgYJKoZIhvZ9B0EABA0wCxsFVjMuMGMDAgbAMA0GCSqGSIb3DQEBBQUA
+A4GBAFjOKer89961zgK5F7WF0bnj4JXMJTENAKaSbn+2kmOeUJXRmm/kEd5jhW6Y
+7qj/WsjTVbJmcVfewCHrPSqnI0kBBIZCe/zuf6IWUrVnZ9NA2zsmWLIodz2uFHdh
+1voqZiegDfqnc1zqcPGUIWVEX/r87yloqaKHee9570+sB3c4
+-----END CERTIFICATE-----
+"))
       (add-hook 'kill-emacs-hook 'twittering-delete-ca-cert-file)
       (setq twittering-cert-file file-name))))
 
-(defun twittering-start-http-session-curl (method headers host port path parameters &optional noninteractive sentinel)
-  ;; TODO: use curl
-  (let* ((request (twittering-make-http-request
-		   method headers host port path parameters))
-	 (temp-buffer (generate-new-buffer "*twmode-http-buffer*"))
-	 (headers (if (assoc "Expect" headers)
-		      headers
-		    (cons '("Expect" . "") headers)))
-	 (curl-args
-	  `("--include" "--silent"
-	    ,@(mapcan (lambda (pair)
-			;; Do not overwrite internal headers `curl' would use.
-			;; Thanks to William Xu.
-			;; "cURL - How To Use"
-			;; http://curl.haxx.se/docs/manpage.html
-			(unless (string= (car pair) "Host")
-			  `("-H" ,(format "%s: %s" (car pair) (cdr pair)))))
-		      headers)
-	    ,@(when twittering-use-ssl
-		`("--cacert" ,(twittering-ensure-ca-cert)))
-	    ,@(when twittering-proxy-use
-		`("-x" ,(format "%s:%s" twittering-proxy-server
-				twittering-proxy-port)))
-	    ,@(when (and twittering-proxy-use
-			 twittering-proxy-user twittering-proxy-password)
-		`("-U" ,(format "%s:%s" twittering-proxy-user
-				twittering-proxy-password)))
-	    ,@(when (string= "POST" method)
-		(mapcan (lambda (pair)
-			  (list
-			   "-d"
-			   (format "%s=%s"
-				   (twittering-percent-encode (car pair))
-				   (twittering-percent-encode (cdr pair)))))
-			parameters))
-	    ,(concat (funcall request :uri)
-		     (when parameters
-		       (concat "?" (funcall request :query-string)))))))
-    (debug-print curl-args)
-    (lexical-let ((noninteractive noninteractive)
-		  (sentinel sentinel))
-      (let ((curl-process
-	     (apply 'start-process
-		    "*twmode-curl*"
-		    temp-buffer
-		    twittering-curl-program
-		    curl-args)))
-	(set-process-sentinel
-	 curl-process
-	 (lambda (&rest args)
-	   (apply #'twittering-http-default-sentinel
-		  sentinel noninteractive args)))
-	curl-process)))
-  )
+(defun twittering-start-http-session-native-tls-p ()
+  (when (require 'tls nil t)
+    (unless twittering-tls-program
+      (let ((programs
+	     (remove nil
+		     (mapcar (lambda (cmd)
+			       (when (string-match "\\`\\([^ ]+\\) " cmd)
+				 (when (executable-find (match-string 1 cmd))
+				   cmd)))
+			     tls-program))))
+	(setq twittering-tls-program
+	      (if twittering-allow-insecure-server-cert
+		  (mapcar
+		   (lambda (str)
+		     (cond
+		      ((string-match "^\\([^ ]*/\\)?openssl s_client " str)
+		       (concat (match-string 0 str) "-verify 0 "
+			       (substring str (match-end 0))))
+		      ((string-match "^\\([^ ]*/\\)?gnutls-cli " str)
+		       (concat (match-string 0 str) "--insecure "
+			       (substring str (match-end 0))))
+		      (t
+		       str)))
+		   programs)
+		programs))))
+    (not (null twittering-tls-program))))
 
 ;; TODO: proxy
-(defun twittering-start-http-session-native (method headers host port path parameters &optional noninteractive sentinel)
-  (let ((request (twittering-make-http-request
-		  method headers host port path parameters))
-	(temp-buffer (generate-new-buffer "*twmode-http-buffer*")))
-    (flet ((request (key)
-		    (funcall request key)))
-      (let* ((request-str
-	      (format "%s %s%s HTTP/1.1\r\n%s\r\n\r\n"
-		      (request :method)
-		      (request :uri)
-		      (if parameters
-			  (concat "?" (request :query-string))
-			"")
-		      (request :headers-string)))
-	     (server (if twittering-proxy-use
-			 twittering-proxy-server
-		       (request :host)))
-	     (port (if twittering-proxy-use
-		       twittering-proxy-port
-		     (request :port)))
-	     (proc (open-network-stream
-		    "network-connection-process" temp-buffer server port))
-	     )
-	(lexical-let ((sentinel sentinel)
-		      (noninteractive noninteractive))
-	  (set-process-sentinel
-	   proc
-	   (lambda (&rest args)
-	     (apply #'twittering-http-default-sentinel
-		    sentinel noninteractive args))))
-	(debug-print request-str)
-	(process-send-string proc request-str)
-	proc)))
-  )
+(defun twittering-send-http-request-native (name buffer connection-info sentinel)
+  (let* ((request (cdr (assq 'request connection-info)))
+	 (method (cdr (assq 'method request)))
+	 (scheme (cdr (assq 'scheme request)))
+	 (host (cdr (assq 'host request)))
+	 (port (cdr (assq 'port request)))
+	 (path (cdr (assq 'path request)))
+	 (query-string (cdr (assq 'query-string request)))
+	 (header-list (cdr (assq 'header-list request)))
+	 (post-body (cdr (assq 'post-body request)))
+	 (use-proxy (cdr (assq 'use-proxy connection-info)))
+	 (proxy-server (cdr (assq 'proxy-server connection-info)))
+	 (proxy-port (cdr (assq 'proxy-port connection-info)))
+	 (proxy-user (cdr (assq 'proxy-user connection-info)))
+	 (proxy-password (cdr (assq 'proxy-password connection-info)))
+	 (use-ssl (cdr (assq 'use-ssl connection-info)))
+	 (allow-insecure-server-cert
+	  (cdr (assq 'allow-insecure-server-cert connection-info)))
+	 (cacert-fullpath (cdr (assq 'cacert-fullpath connection-info)))
+	 (cacert-dir (when cacert-fullpath
+		       (file-name-directory cacert-fullpath)))
+	 (cacert-filename (when cacert-fullpath
+			    (file-name-nondirectory cacert-fullpath)))
+	 (proxy-info
+	  (when twittering-proxy-use
+	    (twittering-proxy-info scheme)))
+	 (connect-host (if proxy-info
+			   (cdr (assq 'server proxy-info))
+			 host))
+	 (connect-port (if proxy-info
+			   (cdr (assq 'port proxy-info))
+			 port))
+	 (request-str
+	  (format "%s %s%s HTTP/1.1\r\n%s\r\n\r\n%s\r\n"
+		  method path
+		  (if query-string
+		      (concat "?" query-string)
+		    "")
+		  (mapconcat (lambda (pair)
+			       (format "%s: %s" (car pair) (cdr pair)))
+			     header-list "\r\n")
+		  (or post-body "")))
+	 (coding-system-for-read 'binary)
+	 (coding-system-for-write 'binary)
+	 (tls-program twittering-tls-program)
+	 (proc
+	  (funcall (if use-ssl
+		       'open-tls-stream
+		     'open-network-stream)
+		   "network-connection-process"
+		   nil connect-host connect-port)))
+    (when proc
+      (set-process-buffer proc buffer)
+      (set-process-sentinel proc sentinel)
+      (process-send-string proc request-str)
+      proc)))
 
-;;; TODO: proxy
-(defun twittering-make-http-request (method headers host port path parameters)
-  "Returns an anonymous function, which holds request data.
-
-A returned function, say REQUEST, is used in this way:
-  (funcall REQUEST :schema) ; => \"http\" or \"https\"
-  (funcall REQUEST :uri) ; => \"http://twitter.com/user_timeline\"
-  (funcall REQUEST :query-string) ; => \"status=hello+twitter&source=twmode\"
-  ...
-
-Available keywords:
-  :method
-  :host
-  :port
-  :headers
-  :headers-string
-  :schema
-  :uri
-  :query-string"
-  (let* ((schema (if twittering-use-ssl "https" "http"))
-	 (default-port (if twittering-use-ssl 443 80))
-	 (port (if port port default-port))
-	 (headers-string
-	  (mapconcat (lambda (pair)
-		       (format "%s: %s" (car pair) (cdr pair)))
-		     headers "\r\n"))
-	 (uri (format "%s://%s%s%s"
-		      schema
-		      host
-		      (if port
-			  (if (equal port default-port)
-			      ""
-			    (format ":%s" port))
-			"")
-		      path))
-	 (query-string
-	  (mapconcat (lambda (pair)
-		       (format
-			"%s=%s"
-			(twittering-percent-encode (car pair))
-			(twittering-percent-encode (cdr pair))))
-		     parameters
-		     "&"))
-	 )
-    (lexical-let ((data `((:method . ,method)
-			  (:host . ,host)
-			  (:port . ,port)
-			  (:headers . ,headers)
-			  (:headers-string . ,headers-string)
-			  (:schema . ,schema)
-			  (:uri . ,uri)
-			  (:query-string . ,query-string)
-			  )))
-      (lambda (key)
-	(let ((pair (assoc key data)))
-	  (if pair (cdr pair)
-	    (error "No such key in HTTP request data: %s" key))))
-      )))
+(defun twittering-pre-process-buffer-native (proc buffer connection-info)
+  (let ((use-ssl (cdr (assq 'use-ssl connection-info)))
+	(args (process-command proc)))
+    (cond
+     ((and use-ssl args
+	   (car
+	    (remove nil
+		    (mapcar (lambda (cmd)
+			      (string-match "^\\(.*/\\)?gnutls-cli\\b" cmd))
+			    args))))
+      (with-current-buffer buffer
+	(save-excursion
+	  (goto-char (point-max))
+	  (when (search-backward-regexp
+		 "- Peer has closed the GNUTLS connection\r?\n\\'")
+	    (let ((beg (match-beginning 0))
+		  (end (match-end 0)))
+	      (delete-region beg end))))))
+     ((and use-ssl args
+	   (car
+	    (remove nil
+		    (mapcar
+		     (lambda (cmd)
+		       (string-match "^\\(.*/\\)?openssl s_client\\b" cmd))
+		     args))))
+      (with-current-buffer buffer
+	(save-excursion
+	  (goto-char (point-max))
+	  (when (search-backward-regexp "closed\r?\n\\'")
+	    (let ((beg (match-beginning 0))
+		  (end (match-end 0)))
+	      (delete-region beg end))))))
+     (t
+      nil))))
 
 (defun twittering-http-application-headers (&optional method headers)
-  "Retuns an assoc list of HTTP headers for twittering-mode."
+  "Return an assoc list of HTTP headers for twittering-mode."
   (unless method
     (setq method "GET"))
 
   (let ((headers headers))
     (push (cons "User-Agent" (twittering-user-agent)) headers)
-    (push (cons "Authorization"
-		(concat "Basic "
-			(base64-encode-string
-			 (concat
-			  (twittering-get-username)
-			  ":"
-			  (twittering-get-password)))))
-	  headers)
     (when (string= "GET" method)
       (push (cons "Accept"
 		  (concat
@@ -2256,53 +4521,100 @@ Available keywords:
       (push (cons "Accept-Charset" "utf-8;q=0.7,*;q=0.7")
 	    headers))
     (when (string= "POST" method)
-      (push (cons "Content-Length" "0") headers)
       (push (cons "Content-Type" "text/plain") headers))
     (when twittering-proxy-use
-      (when twittering-proxy-keep-alive
-	(push (cons "Proxy-Connection" "Keep-Alive")
-	      headers))
-      (when (and twittering-proxy-user
-		 twittering-proxy-password)
-	(push (cons "Proxy-Authorization"
-		    (concat
-		     "Basic "
-		     (base64-encode-string
-		      (concat
-		       twittering-proxy-user
-		       ":"
-		       twittering-proxy-password))))
-	      headers)))
+      (let* ((scheme (if twittering-use-ssl "https" "http"))
+	     (keep-alive (twittering-proxy-info scheme 'keep-alive))
+	     (user (twittering-proxy-info scheme 'user))
+	     (password (twittering-proxy-info scheme 'password)))
+	(when (twittering-proxy-info scheme 'keep-alive)
+	  (push (cons "Proxy-Connection" "Keep-Alive")
+		headers))
+	(when (and user password)
+	  (push (cons
+		 "Proxy-Authorization"
+		 (concat "Basic "
+			 (base64-encode-string (concat user ":" password))))
+		headers))))
     headers
     ))
 
 (defun twittering-get-error-message (buffer)
   (if buffer
-      (let ((xmltree (twittering-get-response-body buffer
-						   'xml-parse-region)))
+      (let ((xmltree (twittering-get-response-body
+		      buffer 'twittering-xml-parse-region)))
 	(car (cddr (assq 'error (or (assq 'errors xmltree)
 				    (assq 'hash xmltree))))))
     nil))
 
-(defun twittering-http-get (host method &optional noninteractive parameters format sentinel)
-  (if (null format)
-      (setq format "xml"))
-  (if (null sentinel)
-      (setq sentinel 'twittering-http-get-default-sentinel))
+(defun twittering-http-application-headers-with-auth (method url query-parameters)
+  "Return an alist of HTTP headers with Authorization for `twittering-mode'.
+METHOD is HTTP method (\"GET\", \"POST\", etc.).
+QUERY-PARAMETERS is a list of cons pair of name and value such as
+'((\"status\" . \"test tweet\")
+  (\"in_reply_to_status_id\" . \"12345678\"))."
+  (let ((auth-str
+	 (cond
+	  ((eq twittering-auth-method 'basic)
+	   (concat "Basic "
+		   (base64-encode-string
+		    (concat (twittering-get-username)
+			    ":" (twittering-get-password)))))
+	  ((memq twittering-auth-method '(oauth xauth))
+	   (let ((access-token
+		  (cdr (assoc "oauth_token"
+			      twittering-oauth-access-token-alist)))
+		 (access-token-secret
+		  (cdr (assoc "oauth_token_secret"
+			      twittering-oauth-access-token-alist)))
+		 (encoded-query-parameters
+		  (mapcar
+		   (lambda (entry)
+		     (let ((name (twittering-percent-encode (car entry)))
+			   (value (twittering-percent-encode (cdr entry))))
+		       `(,name . ,value)))
+		   query-parameters)))
+	     (twittering-oauth-auth-str-access
+	      method url encoded-query-parameters
+	      twittering-oauth-consumer-key twittering-oauth-consumer-secret
+	      access-token access-token-secret)))
+	  (t
+	   nil)))
+	(base-headers (twittering-http-application-headers method)))
+    (if auth-str
+	`(,@base-headers
+	  ("Authorization" . ,auth-str))
+      base-headers)))
 
-  (twittering-start-http-session
-   "GET" (twittering-http-application-headers "GET")
-   host nil (concat "/" method "." format) parameters noninteractive sentinel))
+(defun twittering-http-get (host method &optional noninteractive parameters format sentinel clean-up-sentinel)
+  (let* ((format (or format "xml"))
+	 (sentinel (or sentinel 'twittering-http-get-default-sentinel))
+	 (scheme (if twittering-use-ssl
+		     "https"
+		   "http"))
+	 (path (concat "/" method "." format))
+	 (url (format "%s://%s%s" scheme host path))
+	 (headers
+	  (twittering-http-application-headers-with-auth
+	   "GET" url parameters)))
+    (twittering-start-http-session
+     "GET" headers host nil path parameters noninteractive sentinel
+     clean-up-sentinel)))
 
 (defun twittering-created-at-to-seconds (created-at)
   (let ((encoded-time (apply 'encode-time (parse-time-string created-at))))
     (+ (* (car encoded-time) 65536)
        (cadr encoded-time))))
 
-(defun twittering-http-default-sentinel (func noninteractive proc stat &optional suc-msg)
-  (debug-printf "http-default-sentinel: proc=%s stat=%s" proc stat)
+(defun twittering-http-default-sentinel (proc stat connection-info &optional suc-msg)
+  (debug-printf "http-default-sentinel: proc=%s stat=%s exit-status=%s" proc stat (process-exit-status proc))
   (let ((temp-buffer (process-buffer proc))
 	(status (process-status proc))
+	(exit-status (process-exit-status proc))
+	(authorization-queried (twittering-account-authorization-queried-p))
+	(func (cdr (assq 'sentinel connection-info)))
+	(clean-up-sentinel (cdr (assq 'clean-up-sentinel connection-info)))
+	(noninteractive (cdr (assq 'noninteractive connection-info)))
 	(mes nil))
     (cond
      ((null status)
@@ -2312,27 +4624,40 @@ Available keywords:
       (debug-printf "http-default-sentinel: postponed by status `%s'" status)
       t)
      ((memq status '(exit signal closed failed))
+      (let ((func (cdr (assq 'pre-process-buffer connection-info))))
+	(when (and (buffer-live-p temp-buffer) (functionp func))
+	  ;; Pre-process buffer.
+	  (funcall func proc temp-buffer connection-info)))
       (unwind-protect
-	  (let* ((header (twittering-get-response-header temp-buffer))
-		 (header-info
-		  (and header (twittering-update-server-info header))))
-	    (setq mes
-		  (cond
-		   ((null header-info)
-		    "Failure: Bad http response.")
-		   ((and func (fboundp func))
-		    (with-current-buffer temp-buffer
-		      (funcall func header-info proc noninteractive suc-msg)))
-		   (t
-		    nil))))
+	  (setq mes
+		(if (and (process-command proc)
+			 (not (= 0 exit-status)))
+		    ;; The process exited abnormally.
+		    (format "%s exited abnormally (exit-status=%s)."
+			    (car (process-command proc)) exit-status)
+		  (let* ((header (twittering-get-response-header temp-buffer))
+			 (header-info
+			  (and header (twittering-update-server-info header))))
+		    (cond
+		     ((null header-info)
+		      "Failure: Bad http response.")
+		     ((and func (fboundp func))
+		      (with-current-buffer temp-buffer
+			(funcall func header-info proc noninteractive
+				 suc-msg)))
+		     (t
+		      nil)))))
 	;; unwindforms
 	(twittering-release-process proc)
 	(when (and (not twittering-debug-mode) (buffer-live-p temp-buffer))
 	  (kill-buffer temp-buffer))))
      (t
       (setq mes (format "Failure: unknown condition: %s" status))))
-    (when (and mes (twittering-buffer-related-p))
-      (message mes))))
+    (when (and mes (or (twittering-buffer-related-p)
+		       authorization-queried))
+      (message "%s" mes))
+    (when (and clean-up-sentinel (functionp clean-up-sentinel))
+      (funcall clean-up-sentinel proc noninteractive mes))))
 
 (defun twittering-http-get-default-sentinel (header-info proc noninteractive &optional suc-msg)
   (let ((status-line (cdr (assq 'status-line header-info)))
@@ -2353,7 +4678,7 @@ Available keywords:
 	    ;; statuses is nil. twitter server returns nil as
 	    ;; xmltree with HTTP status-code is "200" when we
 	    ;; retrieved all un-retrieved statuses.
-	    (when new-statuses
+	    (when (and new-statuses buffer)
 	      (twittering-render-timeline buffer t new-statuses))
 	    (twittering-add-timeline-history spec-string)))
 	(if twittering-notify-successful-http-get
@@ -2373,8 +4698,9 @@ Available keywords:
     (case-string
      status-code
      (("200")
-      (let ((xmltree (twittering-get-response-body (process-buffer proc)
-						   'xml-parse-region)))
+      (let ((xmltree
+	     (twittering-get-response-body
+	      (process-buffer proc) 'twittering-xml-parse-region)))
 	(when xmltree
 	  (setq indexes
 		(mapcar
@@ -2400,7 +4726,7 @@ Available keywords:
 	      "")) ;; set "" explicitly if user does not have a list.
     nil))
 
-(defun twittering-http-post (host method &optional parameters format sentinel)
+(defun twittering-http-post (host method &optional parameters format sentinel clean-up-sentinel)
   "Send HTTP POST request to api.twitter.com (or search.twitter.com)
 
 HOST is hostname of remote side, api.twitter.com (or search.twitter.com).
@@ -2409,16 +4735,19 @@ METHOD must be one of Twitter API method classes
 PARAMETERS is alist of URI parameters.
  ex) ((\"mode\" . \"view\") (\"page\" . \"6\")) => <URI>?mode=view&page=6
 FORMAT is a response data format (\"xml\", \"atom\", \"json\")"
-  (if (null format)
-      (setq format "xml"))
-  (if (null sentinel)
-      (setq sentinel 'twittering-http-post-default-sentinel))
-
-  (add-to-list 'parameters '("source" . "twmode"))
-
-  (twittering-start-http-session
-   "POST" (twittering-http-application-headers "POST")
-   host nil (concat "/" method "." format) parameters noninteractive sentinel))
+  (let* ((format (or format "xml"))
+	 (sentinel (or sentinel 'twittering-http-post-default-sentinel))
+	 (scheme (if twittering-use-ssl
+		     "https"
+		   "http"))
+	 (path (concat "/" method "." format))
+	 (url (format "%s://%s%s" scheme host path))
+	 (headers
+	  (twittering-http-application-headers-with-auth
+	   "POST" url parameters)))
+    (twittering-start-http-session
+     "POST" headers host nil path parameters nil sentinel
+     clean-up-sentinel)))
 
 (defun twittering-http-post-default-sentinel (header-info proc noninteractive &optional suc-msg)
   (let ((status-line (cdr (assq 'status-line header-info)))
@@ -2434,21 +4763,17 @@ FORMAT is a response data format (\"xml\", \"atom\", \"json\")"
 	  (format "Response: %s" status-line)))))))
 
 (defun twittering-get-response-header (buffer)
-  "Exract HTTP response header from HTTP response.
+  "Extract HTTP response header from HTTP response.
 BUFFER may be a buffer or the name of an existing buffer which contains the HTTP response."
   (with-current-buffer buffer
     (save-excursion
       (goto-char (point-min))
-      ;; FIXME: curl prints HTTP proxy response header, so strip it
-      (when (search-forward-regexp
-	     "HTTP/1\\.[01] 200 Connection established\r\n\r\n" nil t)
-	(delete-region (point-min) (point)))
       (if (search-forward-regexp "\r?\n\r?\n" nil t)
 	  (buffer-substring (point-min) (match-end 0))
 	nil))))
 
 (defun twittering-get-response-body (buffer &optional func)
-  "Exract HTTP response body from HTTP response.
+  "Extract HTTP response body from HTTP response.
 If FUNC is non-nil, parse a response body by FUNC and return it.
 Return nil when parse failed.
 BUFFER may be a buffer or the name of an existing buffer."
@@ -2469,12 +4794,13 @@ BUFFER may be a buffer or the name of an existing buffer."
       )))
 
 (defun twittering-get-status-from-http-response (spec buffer)
-  "Exract statuses from HTTP response, and return a list.
+  "Extract statuses from HTTP response, and return a list.
 Return nil when parse failed.
 
 SPEC is timeline-spec which was used to retrieve BUFFER.
 BUFFER may be a buffer or the name of an existing buffer."
-  (let ((body (twittering-get-response-body buffer 'xml-parse-region)))
+  (let ((body
+	 (twittering-get-response-body buffer 'twittering-xml-parse-region)))
     (when body
       (if (eq 'search (car spec))
 	  (twittering-atom-xmltree-to-status body)
@@ -2485,11 +4811,19 @@ BUFFER may be a buffer or the name of an existing buffer."
 	(time-str (car (cddr (assq 'updated atom-xml-entry))))
 	(author-str (car (cddr (assq 'name (assq 'author atom-xml-entry))))))
     `((created-at
-       . ,(if (string-match "\\(.*\\)T\\(.*\\)Z" time-str)
+       ;; ISO 8601
+       ;; Twitter -> "2010-05-08T05:59:41Z"
+       ;; StatusNet -> "2010-05-08T08:44:39+00:00"
+       . ,(if (string-match "\\(.*\\)T\\(.*\\)\\(Z\\|\\([-+][0-2][0-9]\\):?\\([0-5][0-9]\\)\\)" time-str)
 	      ;; time-str is formatted as
 	      ;; "Combined date and time in UTC:" in ISO 8601.
-	      (format "%s %s +0000"
-		      (match-string 1 time-str) (match-string 2 time-str))
+	      (let ((timezone (match-string 3 time-str)))
+		(format "%s %s %s"
+			(match-string 1 time-str) (match-string 2 time-str)
+			(if (string= "Z" timezone)
+			    "+0000"
+			  (concat (match-string 4 time-str)
+				  (match-string 5 time-str)))))
 	    ;; unknown format?
 	    time-str))
       (id . ,(progn
@@ -2505,10 +4839,19 @@ BUFFER may be a buffer or the name of an existing buffer."
 		caption))))
       (text . ,(twittering-decode-html-entities
 		(car (cddr (assq 'title atom-xml-entry)))))
-      ,@(progn
-	  (string-match "^\\([^ ]+\\) (\\(.*\\))$" author-str)
+      ,@(cond
+	 ((and (eq twittering-service-method 'statusnet)
+	       (string-match "^\\([^ ]+\\)\\( (\\(.*\\))\\)?$" author-str))
+	  ;; StatusNet
+	  `((user-screen-name . ,(match-string 1 author-str))
+	    (user-name . ,(or (match-string 3 author-str) ""))))
+	 ((string-match "^\\([^ ]+\\) (\\(.*\\))$" author-str)
+	  ;; Twitter (default)
 	  `((user-screen-name . ,(match-string 1 author-str))
 	    (user-name . ,(match-string 2 author-str))))
+	 (t
+	  '((user-screen-name . "PARSING FAILED!!")
+	    (user-name . ""))))
       (user-profile-image-url
        . ,(let* ((link-items
 		  (mapcar
@@ -2519,8 +4862,16 @@ BUFFER may be a buffer or the name of an existing buffer."
 		 (image-urls
 		  (mapcar
 		   (lambda (item)
-		     (when (member '(rel . "image") item)
-		       (cdr (assq 'href item))))
+		     (cond
+		      ((and (eq twittering-service-method 'statusnet)
+			    (member '(rel . "related") item))
+		       ;; StatusNet
+		       (cdr (assq 'href item)))
+		      ((member '(rel . "image") item)
+		       ;; Twitter (default)
+		       (cdr (assq 'href item)))
+		      (t
+		       nil)))
 		   link-items)))
 	    (car-safe (remq nil image-urls)))))))
 
@@ -2555,6 +4906,9 @@ BUFFER may be a buffer or the name of an existing buffer."
 	   original-created-at ;; need not export
 	   original-user-name
 	   original-user-screen-name
+	   (recipient-screen-name
+	    (assq-get 'recipient_screen_name status-data))
+	   recipient_screen_name
 	   source-id
 	   source-created-at)
 
@@ -2611,13 +4965,15 @@ BUFFER may be a buffer or the name of an existing buffer."
                '(id text source created-at truncated
                     in-reply-to-status-id
                     in-reply-to-screen-name
+                    source-id
                     user-id user-name user-screen-name user-location
                     user-description
                     user-profile-image-url
                     user-url
                     user-protected
                     original-user-name
-                    original-user-screen-name))))))
+                    original-user-screen-name
+		    recipient-screen-name))))))
 
 (defun twittering-make-clickable-status-datum (status)
   (flet ((assq-get (item seq)
@@ -2643,6 +4999,7 @@ BUFFER may be a buffer or the name of an existing buffer."
       (add-text-properties
        0 (length user-name)
        `(mouse-face highlight
+		    keymap ,twittering-mode-on-uri-map
 		    uri ,(twittering-get-status-url user-screen-name)
 		    screen-name-in-text ,user-screen-name
 		    goto-spec ,(twittering-string-to-timeline-spec
@@ -2654,6 +5011,7 @@ BUFFER may be a buffer or the name of an existing buffer."
       (add-text-properties
        0 (length user-screen-name)
        `(mouse-face highlight
+		    keymap ,twittering-mode-on-uri-map
 		    uri ,(twittering-get-status-url user-screen-name)
 		    screen-name-in-text ,user-screen-name
 		    goto-spec ,(twittering-string-to-timeline-spec
@@ -2692,6 +5050,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 			 (setq prop
 			       `(mouse-face
 				 highlight
+				 keymap ,twittering-mode-on-uri-map
 				 uri ,url goto-spec ,spec
 				 face twittering-username-face))))
 		      (listname
@@ -2699,6 +5058,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 			     end (match-end 2)
 			     prop `(mouse-face
 				    highlight
+				    keymap ,twittering-mode-on-uri-map
 				    uri ,(twittering-get-status-url listname)
 				    goto-spec
 				    ,(twittering-string-to-timeline-spec
@@ -2709,6 +5069,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 			     end (match-end 3)
 			     prop `(mouse-face
 				    highlight
+				    keymap ,twittering-mode-on-uri-map
 				    uri ,(twittering-get-status-url
 					  screenname)
 				    screen-name-in-text ,screenname
@@ -2721,6 +5082,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 			     end (match-end 4)
 			     prop `(mouse-face
 				    highlight
+				    keymap ,twittering-mode-on-uri-map
 				    uri ,uri
 				    face twittering-uri-face)))
 		      (t
@@ -2738,6 +5100,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 	  (add-text-properties
 	   0 (length source)
 	   `(mouse-face highlight
+			keymap ,twittering-mode-on-uri-map
 			uri ,uri
 			face twittering-uri-face
 			source ,source)
@@ -2762,7 +5125,7 @@ BUFFER may be a buffer or the name of an existing buffer."
 			  (in_reply_to_user_id
 			   nil ,(caddr (assq 'recipient_id c-node)))
 			  (favorited nil "false")
-			  (in_reply_to_screen_name
+			  (recipient_screen_name
 			   nil ,(caddr (assq 'recipient_screen_name c-node)))
 			  (user nil ,@(cdddr (assq 'sender c-node)))))
 	       (remove nil
@@ -2785,27 +5148,8 @@ BUFFER may be a buffer or the name of an existing buffer."
 			      xmltree))))
 
 (defun twittering-percent-encode (str &optional coding-system)
-  (if (or (null coding-system)
-	  (not (coding-system-p coding-system)))
-      (setq coding-system 'utf-8))
-  (mapconcat
-   (lambda (c)
-     (cond
-      ((twittering-url-reserved-p c)
-       (char-to-string c))
-      ((eq c ? ) "+")
-      (t (format "%%%02x" c))))
-   (encode-coding-string str coding-system)
-   ""))
-
-(defun twittering-url-reserved-p (ch)
-  (or (and (<= ?A ch) (<= ch ?Z))
-      (and (<= ?a ch) (<= ch ?z))
-      (and (<= ?0 ch) (<= ch ?9))
-      (eq ?. ch)
-      (eq ?- ch)
-      (eq ?_ ch)
-      (eq ?~ ch)))
+  "Encode STR according to Percent-Encoding defined in RFC 3986."
+  (twittering-oauth-url-encode str coding-system))
 
 (defun twittering-decode-html-entities (encoded-str)
   (if encoded-str
@@ -2866,11 +5210,18 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
 ;;;
 
 (defun twittering-redisplay-status-on-buffer ()
-  (mapc 'twittering-redisplay-status-on-each-buffer
+  (mapc (lambda (buffer)
+	  (unless (with-current-buffer buffer
+		    (or (and (fboundp 'use-region-p) (use-region-p))
+			(and transient-mark-mode mark-active)))
+	    (twittering-redisplay-status-on-each-buffer buffer)))
 	(twittering-get-buffer-list)))
 
 (defun twittering-redisplay-status-on-each-buffer (buffer)
-  (let ((deactivate-mark deactivate-mark))
+  (let ((deactivate-mark deactivate-mark)
+	(window-list (get-buffer-window-list buffer nil t))
+	(marker (with-current-buffer buffer (point-marker)))
+	(result nil))
     (with-current-buffer buffer
       (save-excursion
 	(twittering-for-each-property-region
@@ -2878,18 +5229,43 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
 	 (lambda (beg end value)
 	   (let* ((func (car value))
 		  (args (cdr value))
+		  (current-str (buffer-substring beg end))
 		  (updated-str (apply func beg end args))
+		  (config (twittering-current-window-config window-list))
 		  (buffer-read-only nil))
-	     (delete-region beg end)
-	     (goto-char beg)
-	     (insert updated-str)))
-	 buffer)))))
+	     ;; Replace `current-str' if it differs to `updated-str' with
+	     ;; ignoring properties. This is an ad-hoc solution.
+	     ;; `current-str' is a part of the displayed status, but it has
+	     ;; properties which are determined by the whole status.
+	     ;; (For example, the `id' property.)
+	     ;; Therefore, we cannot compare the strings with their
+	     ;; properties.
+	     (unless (string= current-str updated-str)
+	       ;; If the region to be modified includes the current position,
+	       ;; the point moves to the beginning of the region.
+	       (when (and (< beg marker) (< marker end))
+		 ;; This is required because the point moves to the center if
+		 ;; the point becomes outside of the window by the effect of
+		 ;; `set-window-start'.
+		 (setq result beg))
+	       (delete-region beg end)
+	       (goto-char beg)
+	       (insert updated-str)
+	       (twittering-restore-window-config-after-modification
+		config beg end))))
+	 buffer))
+      (set-marker marker nil)
+      (when (and result (eq (window-buffer) buffer))
+	(let ((win (selected-window)))
+	  (when (< result (window-start win))
+	    (set-window-start win result))
+	  (set-window-point win result))))))
 
 ;;;
 ;;; display functions
 ;;;
 
-(defun twittering-render-timeline (buffer &optional additional timeline-data)
+(defun twittering-render-timeline (buffer &optional additional timeline-data keep-point)
   (with-current-buffer buffer
     (let* ((spec (twittering-get-timeline-spec-for-buffer buffer))
 	   (referring-id-table
@@ -2974,10 +5350,17 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
 		     (twittering-show-replied-statuses
 		      twittering-default-show-replied-tweets))))))
 	   timeline-data)))
-      (if (and twittering-image-stack window-system)
-	  (clear-image-cache))
       (debug-print (current-buffer))
       (cond
+       (keep-point
+	;; Restore points.
+	(mapc (lambda (pair)
+		(let* ((point (car pair))
+		       (window (cdr pair))
+		       (dest (max (point-max) point)))
+		  (set-window-point window dest)))
+	      point-window-list)
+	(goto-char original-pos))
        (rendering-entire
 	;; Go to the latest status of buffer after full insertion.
 	(let ((dest (if twittering-reverse-mode
@@ -3045,7 +5428,7 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
 			 (twittering-get-current-status-head)
 		       (or (twittering-get-next-status-head)
 			   (point-max))))
-		(separtor "\n")
+		(separator "\n")
 		(prefix "  ")
 		(buffer-read-only nil))
 	    (save-excursion
@@ -3059,8 +5442,8 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
 					`(id ,base-id original-id ,id)
 					formatted-status)
 		   (if twittering-reverse-mode
-		       (insert-before-markers formatted-status separtor)
-		     (insert formatted-status separtor))))
+		       (insert-before-markers formatted-status separator)
+		     (insert formatted-status separator))))
 	       statuses)
 	      t))
 	(when interactive
@@ -3104,40 +5487,6 @@ If INTERRUPT is non-nil, the iteration is stopped if FUNC returns nil."
       (twittering-hide-replied-statuses (interactive-p))
     (twittering-show-replied-statuses twittering-show-replied-tweets
 				      (interactive-p))))
-
-(defun twittering-make-display-spec-for-icon (image-url)
-  "Return the specification for `display' text property, which
-limits the size of an icon image IMAGE-URL up to FIXED-LENGTH. If
-the type of the image is not supported, nil is returned.
-
-If the size of the image exceeds FIXED-LENGTH, the center of the
-image are displayed."
-  (let ((image-data (or (gethash `(,image-url . ,twittering-convert-fix-size)
-				 twittering-image-data-table)
-			(twittering-retrieve-image image-url))))
-    (and image-data (image-type-available-p (car image-data))
-	 (let ((image-spec
-		(if (fboundp 'create-animated-image) ;; Emacs24 or later
-		    (create-animated-image (cdr image-data) (car image-data)
-					   t :margin 2)
-		  (create-image (cdr image-data) (car image-data)
-				t :margin 2))))
-	   (if (and twittering-convert-fix-size (not twittering-use-convert))
-	       (let* ((size (if (cdr image-data)
-				(image-size image-spec t)
-			      '(48 . 48)))
-		      (width (car size))
-		      (height (cdr size))
-		      (fixed-length twittering-convert-fix-size)
-		      (half-fixed-length (/ fixed-length 2))
-		      (slice-spec
-		       (if (or (< fixed-length width) (< fixed-length height))
-			   `(slice ,(max 0 (- (/ width 2) half-fixed-length))
-				   ,(max 0 (- (/ height 2) half-fixed-length))
-				   ,fixed-length ,fixed-length)
-			 `(slice 0 0 ,fixed-length ,fixed-length))))
-		 `(display (,image-spec ,slice-spec)))
-	     `(display ,image-spec))))))
 
 (defun twittering-format-string (string prefix replacement-table)
   "Format STRING according to PREFIX and REPLACEMENT-TABLE.
@@ -3202,260 +5551,215 @@ following symbols;
       (concat result skipped-string))
     ))
 
-(defun twittering-parse-format-string (format-str escape specifiers)
-  "Split FORMAT-STR into a list consisting of fixed strings and specifiers
-with match-data. For example:
- (twittering-parse-format-string
- \"%s>>%r @%C{%m/%d %H:%M:%S} %@\\n %t\" \"%\"
- '(\"%\" \"s\" \"r\" \"@\" \"t\" \"i\" \"C\\\\({\\\\([^}]*\\\\)}\\\\)?\"))
-returns
- ((\"s\" \"s\" (0 1))
- \">>\"
- (\"r\" \"r\" (0 1))
- \" @\"
- (\"C\\\\({\\\\([^}]*\\\\)}\\\\)?\" \"C{%m/%d %H:%M:%S}\" (0 17 1 17 2 16))
- \" \"
- (\"@\" \"@\" (0 1))
- \"\\n \"
- (\"t\" \"t\" (0 1)))
-.
-In the result list, a fixed string is stored as a normal string.
-A format specifier is stored as a list of the regexp for the specifier,
-the matched string in FORMAT-STR and its match data."
-  (let ((pos 0)
-        (result nil)
-        (case-fold-search nil))
-    (while (string-match escape format-str pos)
-      (let ((beg (match-beginning 0)))
-        (unless (eq pos beg)
-          (setq result (cons (substring format-str pos beg) result)))
-        (let* ((rest specifiers)
-               (head (+ beg (length escape)))
-               (following (substring format-str head)))
-          (while
-              (unless (or (null rest)
-                          (string-match (concat "\\`" (car rest)) following))
-                (setq rest (cdr rest))))
-          (let ((end (if rest
-                         (+ head (match-end 0))
-                       head)))
-            (if rest
-                (setq result (cons (list (car rest)
-                                         (match-string 0 following)
-                                         (match-data))
-                                   result))
-              (setq result (cons (substring format-str beg end) result)))
-            (setq pos end)))))
-    (when (< pos (length format-str))
-      (setq result (cons (substring format-str pos) result)))
-    (nreverse result)))
+(defun twittering-generate-format-table (status-sym prefix-sym)
+  `(("%" . "%")
+    ("}" . "}")
+    ("#" . (cdr (assq 'id ,status-sym)))
+    ("'" . (when (string= "true" (cdr (assq 'truncated ,status-sym)))
+	     "..."))
+    ("c" . (cdr (assq 'created-at ,status-sym)))
+    ("d" . (cdr (assq 'user-description ,status-sym)))
+    ("f" . (cdr (assq 'source ,status-sym)))
+    ("i" .
+     (when (and twittering-icon-mode window-system)
+       (let ((url
+	      (cond
+	       ((and twittering-use-profile-image-api
+		     (eq twittering-service-method 'twitter)
+		     (or (null twittering-convert-fix-size)
+			 (member twittering-convert-fix-size '(48 73))))
+		(let ((user (cdr (assq 'user-screen-name ,status-sym)))
+		      (size
+		       (if (or (null twittering-convert-fix-size)
+			       (= 48 twittering-convert-fix-size))
+			   "normal"
+			 "bigger")))
+		  (format "http://%s/%s/%s.xml?size=%s" twittering-api-host
+			  (twittering-api-path "users/profile_image") user size)))
+	       (t
+		(cdr (assq 'user-profile-image-url ,status-sym))))))
+	 (twittering-make-icon-string nil nil url))))
+    ("j" . (cdr (assq 'user-id ,status-sym)))
+    ("L" .
+     (let ((location (or (cdr (assq 'user-location ,status-sym)) "")))
+       (unless (string= "" location)
+	 (concat "[" location "]"))))
+    ("l" . (cdr (assq 'user-location ,status-sym)))
+    ("p" . (when (string= "true" (cdr (assq 'user-protected ,status-sym)))
+	     "[x]"))
+    ("r" .
+     (let ((reply-id (or (cdr (assq 'in-reply-to-status-id ,status-sym)) ""))
+	   (reply-name (or (cdr (assq 'in-reply-to-screen-name ,status-sym))
+			   ""))
+	   (recipient-screen-name
+	    (cdr (assq 'recipient-screen-name ,status-sym))))
+       (let* ((pair
+	       (cond
+		(recipient-screen-name
+		 (cons (format "sent to %s" recipient-screen-name)
+		       (twittering-get-status-url recipient-screen-name)))
+		((and (not (string= "" reply-id))
+		      (not (string= "" reply-name)))
+		 (cons (format "in reply to %s" reply-name)
+		       (twittering-get-status-url reply-name reply-id)))
+		(t nil)))
+	      (str (car pair))
+	      (url (cdr pair))
+	      (properties
+	       (list 'mouse-face 'highlight 'face 'twittering-uri-face
+		     'keymap twittering-mode-on-uri-map
+		     'uri url)))
+	 (when (and str url)
+	   (concat " " (apply 'propertize str properties))))))
+    ("R" .
+     (let ((retweeted-by
+	    (or (cdr (assq 'original-user-screen-name ,status-sym)) "")))
+       (unless (string= "" retweeted-by)
+	 (concat " (retweeted by " retweeted-by ")"))))
+    ("S" . (cdr (assq 'user-name ,status-sym)))
+    ("s" . (cdr (assq 'user-screen-name ,status-sym)))
+    ("T" . (cdr (assq 'text ,status-sym)))
+    ("t" . (cdr (assq 'text ,status-sym)))
+    ("u" . (cdr (assq 'user-url ,status-sym)))))
 
-(defun twittering-generate-formater (format-str-exp escape status-sym prefix-sym specifier-sym specifiers)
-  "Generate lambda expression from FORMAT-STR-EXP.
-The result expression does not include specifiers except those appeared
-in FORMAT-STR-EXP.
-ESCAPE means the escape string of specifiers.
-SPECIFIERS is a list of '(SPEC-REGEXP (STATIC-BINDINGS) FORMS), where
-SPEC-REGEXP is a regexp for the specifier without ESCAPE,
-STATIC-BINDINGS means bindings determined on expanding this macro
-and FORMS generates a string for the specifier by using the argument
-of the lambda.
-In FORMS, the first argument of the lambda can be refered by STATUS-SYM.
-And the second argument of the lambda can be refered by PREFIX-SYM.
-In STATIC-BINDINGS and FORMS, the string matched with SPEC-REGEXP can be
-refered by SPECIFIER-SYM.
-Example:
- (twittering-generate-formater
-  \"HEAD%# %CsampleSAMPLE TEST\"
-  \"%\" 'status 'prefix 'fmt-following
-  '((\"%\" () \"%\")
-    (\"#\" () (cdr (assq 'id status)))
-    (\"s\" () (cdr (assq 'user-screen-name status)))
-    (\"C\\\\([a-z]+\\\\)\"
-     ((sample (match-string 1 fmt-following))
-      (sample2 sample))
-     sample)
-    ))
- returns
- (lambda
-   (status prefix)
-   (concat \"HEAD\"
-           (let
-               ((fmt-following \"#\"))
-             (let nil
-               (store-match-data
-                '(0 1))
-               (cdr
-                (assq 'id status))))
-           \" \"
-           (let
-               ((fmt-following \"Csample\"))
-             (let
-                 ((sample \"sample\")
-                  (sample2 \"sample\"))
-               (store-match-data
-                '(0 7 1 7))
-               sample))
-           \"SAMPLE TEST\"))
- "
-  (let* ((format-str (eval format-str-exp))
-         (seq (twittering-parse-format-string format-str escape
-                                              (mapcar 'car specifiers))))
-    `(lambda (,status-sym ,prefix-sym)
-       (concat
-	,@(mapcar
-	   (lambda (entry)
-	     (let ((static-def (cadr (assoc (elt entry 0) specifiers)))
-		   (dynamic-def (cddr (assoc (elt entry 0) specifiers))))
-	       (if (not (listp entry))
-		   entry
-		 (store-match-data (elt entry 2))
-		 (let* ((acc `((,specifier-sym (elt entry 1))))
-			(static-binding
-			 (mapcar
-			  (lambda (bind)
-			    (let* ((var (car bind))
-				   (value (eval `(let ,acc ,(cadr bind))))
-				   (new-bind
-				    (if (or (stringp value) (functionp value)
-					    (numberp value))
-					`(,var ,value)
-				      `(,var ',value))))
-			      (setq acc (cons new-bind acc))
-			      new-bind))
-			  static-def)))
-		   `(let ((,specifier-sym ,(elt entry 1)))
-		      (let ,static-binding
-			(store-match-data ',(elt entry 2))
-			,@dynamic-def))))))
-	   seq)))))
+(defun twittering-generate-formater-for-first-spec (format-str status-sym prefix-sym)
+  (cond
+   ((string-match "\\`}" format-str)
+    ;; "}" at the first means the end of the current level.
+    `(nil . ,(substring format-str (match-end 0))))
+   ((string-match "\\`%" format-str)
+    (let* ((following (substring format-str 1))
+	   (table (twittering-generate-format-table status-sym prefix-sym))
+	   (regexp (concat "\\`\\(" (mapconcat 'car table "\\|") "\\)"))
+	   (case-fold-search nil))
+      (cond
+       ((string-match "\\`@\\({\\([^}]*\\)}\\)?" following)
+	(let ((time-format (or (match-string 2 following)
+			       "%I:%M %p %B %d, %Y"))
+	      (rest (substring following (match-end 0))))
+	  `((let* ((created-at-str (cdr (assq 'created-at ,status-sym)))
+		   (created-at
+		    (apply 'encode-time
+			   (parse-time-string created-at-str)))
+		   (url
+		    (twittering-get-status-url
+		     (cdr (assq 'user-screen-name ,status-sym))
+		     (or (cdr (assq 'source-id ,status-sym))
+			 (cdr (assq 'id ,status-sym)))))
+		   (properties
+		    (list 'mouse-face 'highlight 'face 'twittering-uri-face
+			  'keymap twittering-mode-on-uri-map
+			  'uri url)))
+	      (twittering-make-passed-time-string
+	       nil nil created-at ,time-format properties))
+	    . ,rest)))
+       ((string-match "\\`C\\({\\([^}]*\\)}\\)?" following)
+	(let ((time-format (or (match-string 2 following) "%H:%M:%S"))
+	      (rest (substring following (match-end 0))))
+	  `((let* ((created-at-str (cdr (assq 'created-at ,status-sym)))
+		   (created-at (apply 'encode-time
+				      (parse-time-string created-at-str))))
+	      (format-time-string ,time-format created-at))
+	    . ,rest)))
+       ((string-match "\\`FACE\\[\\([a-zA-Z0-9:-]+\\)\\]{" following)
+	(let* ((face-name-str (match-string 1 following))
+	       (str-after-brace (substring following (match-end 0)))
+	       (face-sym (intern face-name-str))
+	       (pair (twittering-generate-formater-for-current-level
+		      str-after-brace status-sym prefix-sym))
+	       (braced-body (car pair))
+	       (rest (cdr pair)))
+	  `((propertize (concat ,@braced-body) 'face ',face-sym)
+	    . ,rest)))
+       ((string-match "\\`\\(FILL\\|FOLD\\)\\(\\[\\([^]]*\\)\\]\\)?{"
+		      following)
+	(let* ((str-after-brace (substring following (match-end 0)))
+	       (specifier (match-string 1 following))
+	       (prefix-str (match-string 3 following))
+	       (pair (twittering-generate-formater-for-current-level
+		      str-after-brace status-sym prefix-sym))
+	       (filled-body (car pair))
+	       (formater
+		`(lambda (,status-sym ,prefix-sym)
+		   (let ((,prefix-sym (concat ,prefix-sym ,prefix-str)))
+		     (concat ,@filled-body))))
+	       (keep-newline (string= "FOLD" specifier))
+	       (rest (cdr pair)))
+	  `((twittering-update-filled-string
+	     nil nil ,formater ,status-sym ,prefix-sym ,prefix-str
+	     ,keep-newline)
+	    . ,rest)))
+       ((string-match regexp following)
+	(let ((specifier (match-string 1 following))
+	      (rest (substring following (match-end 0))))
+	  `(,(cdr (assoc specifier table)) . ,rest)))
+       (t
+	`("%" . ,following)))))
+   ((string-match "\\(%\\|}\\)" format-str)
+    (let* ((sep (match-beginning 0))
+	   (first (substring format-str 0 sep))
+	   (last (substring format-str sep)))
+      ;; Split before "%" or "}".
+      `(,first . ,last)))
+   (t
+    `(,format-str . nil))))
 
-(defun twittering-generate-status-formater-base (format-str)
-  (twittering-generate-formater
-   format-str "%" 'status 'prefix 'fmt-following
-   '(("%" () "%")
-     ("#" () (cdr (assq 'id status)))
-     ("'" () (if (string= "true" (cdr (assq 'truncated status)))
-		 "..."
-	       ""))
-     ("@" ()
-      (let* ((created-at-str (cdr (assq 'created-at status)))
-	     (created-at
-	      (apply 'encode-time
-		     (parse-time-string created-at-str)))
-	     (url
-	      (twittering-get-status-url
-	       (cdr (assq 'user-screen-name status))
-	       (cdr (assq 'id status))))
-	     (properties
-	      `(mouse-face highlight face twittering-uri-face uri ,url)))
-	(twittering-make-passed-time-string nil nil created-at properties)))
-     ("C\\({\\([^}]*\\)}\\)?"
-      ((time-format (or (match-string 2 fmt-following) "%H:%M:%S")))
-      (let* ((created-at-str (cdr (assq 'created-at status)))
-	     (created-at (apply 'encode-time
-				(parse-time-string created-at-str))))
-	(format-time-string time-format created-at)))
-     ("c" () (cdr (assq 'created-at status)))
-     ("d" () (cdr (assq 'user-description status)))
-     ("FACE\\[\\([a-zA-Z0-9:-]+\\)\\]{\\(\\([^{}]*?\\|{.*?[^%]}\\|%}\\)*\\)}"
-      ((face-name-str (match-string 1 fmt-following))
-       (face-sym (intern face-name-str))
-       (braced-str (match-string 2 fmt-following))
-       (formater (twittering-generate-status-formater-base braced-str)))
-      (let ((formated-str (funcall formater status prefix)))
-	(add-text-properties 0 (length formated-str) `(face ,face-sym)
-			     formated-str)
-	formated-str))
-     ("FILL{\\(\\([^{}]*?\\|{.*?[^%]}\\|%}\\)*\\)}"
-      ((braced-str (match-string 1 fmt-following))
-       (formater (twittering-generate-status-formater-base braced-str)))
-      (twittering-update-filled-string nil nil formater status prefix))
-     ("f" () (cdr (assq 'source status)))
-     ("i" ()
-      (when (and twittering-icon-mode window-system)
-	(let* ((url (cdr (assq 'user-profile-image-url status)))
-	       (display-spec (twittering-make-display-spec-for-icon url)))
-	  (when display-spec
-	    (let ((icon-string (copy-sequence " ")))
-	      (set-text-properties 0 (length icon-string)
-				   display-spec icon-string)
-	      (add-to-list 'twittering-image-stack url)
-	      icon-string)))))
-     ("j" () (cdr (assq 'user-id status)))
-     ("L" ()
-      (let ((location (or (cdr (assq 'user-location status)) "")))
-	(unless (string= "" location)
-	  (concat "[" location "]"))))
-     ("l" () (cdr (assq 'user-location status)))
-     ("p" () (if (string= "true" (cdr (assq 'user-protected status)))
-		 "[x]"
-	       ""))
-     ("r" ()
-      (let ((reply-id (or (cdr (assq 'in-reply-to-status-id status)) ""))
-	    (reply-name (or (cdr (assq 'in-reply-to-screen-name status)) "")))
-	(if (string= "" reply-name)
-	    ""
-	  (let ((in-reply-to-string nil)
-		(url nil)
-		;; FIXME: If multiple buffers are implemented, `spec'
-		;; must be setted as independent to current timeline.
-		(spec (twittering-current-timeline-spec)))
-	    (if (twittering-timeline-spec-is-direct-messages-p spec)
-		;; for direct_messages{,_sent}.
-		(setq in-reply-to-string (format "sent to %s" reply-name)
-		      url (twittering-get-status-url reply-name))
-	      ;; for other standard timeline.
-	      (unless (string= "" reply-id)
-		(setq in-reply-to-string (format "in reply to %s" reply-name)
-		      url (twittering-get-status-url reply-name reply-id)))
-	    (when (and in-reply-to-string url)
-	      (concat
-	       " "
-	       (progn
-		 (add-text-properties
-		  0 (length in-reply-to-string)
-		  `(mouse-face highlight face twittering-uri-face uri ,url)
-		  in-reply-to-string)
-		 in-reply-to-string))))))))
-     ("R" ()
-      (let ((retweeted-by (or (cdr (assq 'original-user-screen-name status))
-			      "")))
-	(unless (string= "" retweeted-by)
-	  (concat " (retweeted by " retweeted-by ")"))))
-     ("S" () (cdr (assq 'user-name status)))
-     ("s" () (cdr (assq 'user-screen-name status)))
-     ("T" () (cdr (assq 'text status)))
-     ("t" () (cdr (assq 'text status)))
-     ("u" () (cdr (assq 'user-url status)))
-     )))
+(defun twittering-generate-formater-for-current-level (format-str status-sym prefix-sym)
+  (let ((result nil)
+	(rest format-str)
+	(continue t))
+    (while (and continue rest)
+      (let* ((pair
+	      (twittering-generate-formater-for-first-spec
+	       rest status-sym prefix-sym))
+	     (current-result (car pair)))
+	(if current-result
+	    (setq result (append result `(,current-result)))
+	  ;; If `result' is nil, it means the end of the current level.
+	  (setq continue nil))
+	(setq rest (cdr pair))))
+    `(,result . ,rest)))
 
 (defun twittering-generate-format-status-function (format-str)
-  `(lambda (status prefix)
-     (let* ((username (cdr (assq 'user-screen-name status)))
-	    (id (cdr (assq 'id status)))
-	    (text (cdr (assq 'text status)))
-	    (common-properties (list 'username username 'id id 'text text))
-	    (str (funcall
-		  ,(twittering-generate-status-formater-base format-str)
-		  status prefix))
-	    (str (if prefix
-		     (replace-regexp-in-string "^" prefix str)
-		   str))
-	    (next (next-single-property-change 0 'need-to-be-updated str))
-	    (need-to-be-updated
-	     (or (get-text-property 0 'need-to-be-updated str)
-		 (and next (< next (length str))))))
-       (add-text-properties 0 (length str) common-properties str)
-       (when (and prefix need-to-be-updated)
-	 ;; With a prefix, redisplay the total status instead of
-	 ;; redisplaying partially.
-	 (remove-text-properties 0 (length str) '(need-to-be-updated nil) str)
-	 (put-text-property 0 (length str) 'need-to-be-updated
-			    `(twittering-format-status-for-redisplay
-			      ,status ,prefix)
-			    str))
-       str)))
+  (let* ((status-sym 'status)
+	 (prefix-sym 'prefix)
+	 (pair
+	  (twittering-generate-formater-for-current-level
+	   format-str status-sym prefix-sym))
+	 (body (car pair))
+	 (rest (cdr pair)))
+    (cond
+     ((null rest)
+      `(lambda (status prefix)
+	 (let* ((username (cdr (assq 'user-screen-name status)))
+		(id (cdr (assq 'id status)))
+		(source-id (cdr (assq 'source-id status)))
+		(text (cdr (assq 'text status)))
+		(common-properties
+		 (list 'username username 'id id 'source-id source-id
+		       'text text))
+		(str (concat ,@body))
+		(str (if prefix
+			 (replace-regexp-in-string "^" prefix str)
+		       str))
+		(next (next-single-property-change 0 'need-to-be-updated str))
+		(need-to-be-updated
+		 (or (get-text-property 0 'need-to-be-updated str)
+		     (and next (< next (length str))))))
+	   (add-text-properties 0 (length str) common-properties str)
+	   (when (and prefix need-to-be-updated)
+	     ;; With a prefix, redisplay the total status instead of
+	     ;; redisplaying partially.
+	     (remove-text-properties 0 (length str)
+				     '(need-to-be-updated nil) str)
+	     (put-text-property 0 (length str) 'need-to-be-updated
+				`(twittering-format-status-for-redisplay
+				  ,status ,prefix)
+				str))
+	   str)))
+     (t
+      (message "Failed to generate a status formater for `twittering-mode'.")
+      nil))))
 
 (defun twittering-update-status-format (&optional format-str)
   (let ((format-str (or format-str twittering-status-format)))
@@ -3499,7 +5803,7 @@ variable `twittering-status-format'."
       )))
 
 (defun twittering-show-minibuffer-length (&optional beg end len)
-  "Show the number of charactors in minibuffer."
+  "Show the number of characters in minibuffer."
   (when (minibuffer-window-active-p (selected-window))
     (if (and transient-mark-mode deactivate-mark)
 	(deactivate-mark))
@@ -3526,8 +5830,8 @@ variable `twittering-status-format'."
     (insert status)
     (goto-char (point-min))
     ;; skip user name
-    (re-search-forward "^[\n\r \t]*@[a-zA-Z0-9_-]+\\([\n\r \t]+@[a-zA-Z0-9_-]+\\)*" nil t)
-    (re-search-forward "[^\n\r \t]+" nil t)))
+    (re-search-forward "\\`[[:space:]]*@[a-zA-Z0-9_-]+\\([[:space:]]+@[a-zA-Z0-9_-]+\\)*" nil t)
+    (re-search-forward "[^[:space:]]" nil t)))
 
 (defun twittering-update-status-from-minibuffer (&optional init-str reply-to-id username spec)
   (and (not (twittering-timeline-spec-is-direct-messages-p spec))
@@ -3557,26 +5861,27 @@ variable `twittering-status-format'."
 		(cond
 		 ((twittering-timeline-spec-is-direct-messages-p spec)
 		  (if username
-		      (let ((parameters `(("user" . ,username)
-					  ("text" . ,status))))
-			(twittering-http-post twittering-api-host
-					      "1/direct_messages/new"
-					      parameters))
+		      (twittering-call-api 'send-direct-message
+					   `((username . ,username)
+					     (status . ,status)))
 		    (message "No username specified")))
 		 (t
-		  (let ((parameters `(("status" . ,status-with-sign))))
+		  (let ((parameters `(("status" . ,status-with-sign)))
+			(as-reply
+			 (and reply-to-id
+			      username
+			      (string-match
+			       (concat "\\`@" username "\\(?:[\n\r \t]+\\)*")
+			       status))))
 		    ;; Add in_reply_to_status_id only when a posting
 		    ;; status begins with @username.
-		    (when (and reply-to-id
-			       username
-			       (string-match
-				(concat "^@" username "\\(?:[\n\r \t]+\\)*")
-				status))
-		      (add-to-list 'parameters
-				   `("in_reply_to_status_id" . ,reply-to-id)))
-		    (twittering-http-post twittering-api-host
-					  "1/statuses/update"
-					  parameters))))
+		    (twittering-call-api
+		     'update-status
+		     `((status . ,status-with-sign)
+		       ,@(when as-reply
+			   `((in-reply-to-status-id
+			      . ,(format "%s" reply-to-id))))))
+		    )))
 		(setq not-posted-p nil))
 	      )))
       ;; unwindforms
@@ -3587,131 +5892,76 @@ variable `twittering-status-format'."
       )))
 
 (defun twittering-get-list-index (username)
-  (twittering-http-get twittering-api-host
-		       (concat "1/" username "/lists")
-		       t nil nil
-		       'twittering-http-get-list-index-sentinel))
+  (twittering-call-api
+   'get-list-index
+   `((username . ,username)
+     (sentinel . twittering-http-get-list-index-sentinel))))
 
 (defun twittering-get-list-index-sync (username)
   (setq twittering-list-index-retrieved nil)
-  (twittering-get-list-index username)
-  (while (not twittering-list-index-retrieved)
-    (sit-for 0.1))
+  (let ((proc (twittering-get-list-index username)))
+    (when proc
+      (while (and (not twittering-list-index-retrieved)
+		  (not (memq (process-status proc)
+			     '(exit signal closed failed nil))))
+	(sit-for 0.1))))
   (cond
+   ((null twittering-list-index-retrieved)
+    nil)
    ((stringp twittering-list-index-retrieved)
     (if (string= "" twittering-list-index-retrieved)
 	(message "%s does not have a list." username)
-      (message twittering-list-index-retrieved))
+      (message "%s" twittering-list-index-retrieved))
     nil)
    ((listp twittering-list-index-retrieved)
     twittering-list-index-retrieved)))
-
-(defun twittering-manage-friendships (method username)
-  (twittering-http-post twittering-api-host
-			(concat "1/friendships/" method)
-			`(("screen_name" . ,username))))
-
-(defun twittering-manage-favorites (method id)
-  (twittering-http-post twittering-api-host
-			(concat "1/favorites/" method "/" id)))
-
-(defun twittering-get-tweets (host method &optional noninteractive id since_id word)
-  (let* ((default-count 20)
-	 (do-search-flag (not (null word)))
-	 (max-count (if do-search-flag
-			100 ;; FIXME: refer to defconst.
-		      twittering-max-number-of-tweets-on-retrieval))
-	 (count twittering-number-of-tweets-on-retrieval)
-	 (count (cond
-		 ((integerp count) count)
-		 ((string-match "^[0-9]+$" count)
-		  (string-to-number count 10))
-		 (t default-count)))
-	 (count (min (max 1 count) max-count))
-	 (regexp-list-method "^1/[^/]*/lists/[^/]*/statuses$")
-	 (parameters nil))
-    (cond ((stringp id)
-	   (add-to-list 'parameters `("max_id" . ,id)))
-	  ((stringp since_id)
-	   (add-to-list 'parameters `("since_id" . ,since_id))))
-    (cond
-     (do-search-flag
-      (add-to-list 'parameters `("q" . ,word))
-      (add-to-list 'parameters `("rpp" . ,(number-to-string count)))
-      (twittering-http-get host method noninteractive parameters "atom"))
-     (t
-      (add-to-list 'parameters
-		   (cons (if (string-match regexp-list-method method)
-			     "per_page"
-			   "count")
-			 (number-to-string count)))
-      (twittering-http-get host method noninteractive parameters)))))
 
 (defun twittering-get-and-render-timeline (&optional noninteractive id)
   (let ((spec (twittering-current-timeline-spec))
 	(spec-string (twittering-current-timeline-spec-string)))
     (cond
+     ((not (twittering-account-authorized-p))
+      ;; ignore any requests if the account has not been authorized.
+      (message "No account for Twitter has been authorized.")
+      t)
      ((and noninteractive (twittering-process-active-p spec))
       ;; ignore non-interactive request if a process is waiting for responses.
       t)
      ((twittering-timeline-spec-primary-p spec)
-      (let ((info (twittering-timeline-spec-to-host-method spec))
-	    (is-search-spec (eq 'search (car spec))))
-	(when info
-	  (let* ((host (elt info 0))
-		 (method (elt info 1))
-		 ;; Assume that a list which was returned by
-		 ;; `twittering-current-timeline-data' is sorted.
-		 (since_id (or is-search-spec (cdr-safe (assq 'id (car (twittering-current-timeline-data spec))))))
-		 (word (and is-search-spec (cadr spec)))
-		 (proc (twittering-get-tweets host method noninteractive
-					      id since_id word)))
-	    (when proc
-	      (twittering-register-process proc spec spec-string))))))
+      (let* ((is-search-spec (eq 'search (car spec)))
+	     (default-number 20)
+	     (max-number (if is-search-spec
+			    100 ;; FIXME: refer to defconst.
+			  twittering-max-number-of-tweets-on-retrieval))
+	     (number twittering-number-of-tweets-on-retrieval)
+	     (number (cond
+		     ((integerp number) number)
+		     ((string-match "^[0-9]+$" number)
+		      (string-to-number number 10))
+		     (t default-number)))
+	     (number (min (max 1 number) max-number))
+	     (latest-status
+	      ;; Assume that a list which was returned by
+	      ;; `twittering-current-timeline-data' is sorted.
+	      (car (twittering-current-timeline-data spec)))
+	     (since_id (cdr-safe (assq 'id latest-status)))
+	     (word (when is-search-spec (cadr spec)))
+	     (args
+	      `((timeline-spec . ,spec)
+		(timeline-spec-string . ,spec-string)
+		(number . ,number)
+		,@(when id `((max_id . ,id)))
+		,@(cond
+		   (is-search-spec `((word . ,word)))
+		   ((and since_id (null id)) `((since_id . ,since_id)))
+		   (t nil))))
+	     (proc
+	      (twittering-call-api 'retrieve-timeline args noninteractive)))
+	(when proc
+	  (twittering-register-process proc spec spec-string))))
      (t
       (let ((type (car spec)))
 	(error "%s has not been supported yet" type))))))
-
-(defun twittering-retrieve-image (image-url)
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (let ((coding-system-for-read 'binary)
-	  (coding-system-for-write 'binary)
-	  (require-final-newline nil))
-      (twittering-url-insert-file-contents image-url)
-      (let ((image-type (twittering-image-type image-url (current-buffer))))
-	(and twittering-use-convert
-	     (or (not (image-type-available-p image-type))
-		 (and (integerp twittering-convert-fix-size)
-		      (not (let ((image-spec
-				  (create-image (buffer-string) image-type t))
-				 (converted-image-size
-				  `(,twittering-convert-fix-size
-				    . ,twittering-convert-fix-size)))
-			     (equal (image-size image-spec t)
-				    converted-image-size)))))
-	     (let ((exit-status
-		    (call-process-region
-		     (point-min) (point-max)
-		     twittering-convert-program
-		     t t nil
-		     (if image-type (format "%s:-" image-type) "-")
-		     (when (integerp twittering-convert-fix-size)
-		       "-resize")
-		     (when (integerp twittering-convert-fix-size)
-		       (format "%dx%d" twittering-convert-fix-size
-			       twittering-convert-fix-size))
-		     "xpm:-")))
-	       (setq image-type (and (integerp exit-status)
-				     (= 0 exit-status)
-				     'xpm))))
-	(if image-type
-	    (let ((image-data `(,image-type . ,(buffer-string))))
-	      (puthash `(,image-url . ,twittering-convert-fix-size)
-		       image-data
-		       twittering-image-data-table)
-	      image-data)
-	  nil)))))
 
 (defun twittering-tinyurl-get (longurl)
   "Tinyfy LONGURL."
@@ -3782,6 +6032,12 @@ variable `twittering-status-format'."
     (unless (eq prev-mode twittering-jojo-mode)
       (twittering-update-mode-line))))
 
+(defun twittering-jojo-mode-p (spec)
+  (let ((buffer (twittering-get-buffer-from-spec spec)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+	twittering-jojo-mode))))
+
 (defun twittering-toggle-reverse-mode (&optional arg)
   (interactive "P")
   (let ((prev-mode twittering-reverse-mode))
@@ -3813,14 +6069,23 @@ variable `twittering-status-format'."
   (interactive)
   (twittering-visit-timeline `(user ,(twittering-get-username))))
 
+(defun twittering-direct-messages-timeline ()
+  (interactive)
+  (twittering-visit-timeline '(direct_messages)))
+
+(defun twittering-sent-direct-messages-timeline ()
+  (interactive)
+  (twittering-visit-timeline '(direct_messages_sent)))
+
 (defun twittering-update-active-buffers (&optional noninteractive)
   "Invoke `twittering-get-and-render-timeline' for each active buffer
 managed by `twittering-mode'."
-  (let ((buffer-list (twittering-get-active-buffer-list)))
-    (mapc (lambda (buffer)
-	    (with-current-buffer buffer
-	      (twittering-get-and-render-timeline noninteractive)))
-	  buffer-list)))
+  (when (twittering-account-authorized-p)
+    (let ((buffer-list (twittering-get-active-buffer-list)))
+      (mapc (lambda (buffer)
+	      (with-current-buffer buffer
+		(twittering-get-and-render-timeline noninteractive)))
+	    buffer-list))))
 
 (defun twittering-current-timeline-noninteractive ()
   (twittering-current-timeline t))
@@ -3835,21 +6100,51 @@ managed by `twittering-mode'."
   (interactive)
   (funcall twittering-update-status-function))
 
+(defun twittering-delete-status (&optional id)
+  (interactive)
+  (let* ((id (get-text-property (point) 'id))
+	 (username (get-text-property (point) 'username))
+	 (text (copy-sequence (get-text-property (point) 'text)))
+	 (text (progn
+		 (set-text-properties 0 (length text) nil text)
+		 text))
+	 (width (max 40 ;; XXX
+		     (- (frame-width)
+			1 ;; margin for wide characters
+			11 ;; == (length (concat "Delete \"" "\"? "))
+			9) ;; == (length "(y or n) ")
+		     ))
+	 (mes (format "Delete \"%s\"? "
+		      (if (< width (string-width text))
+			  (concat
+			   (truncate-string-to-width text (- width 3))
+			   "...")
+			text))))
+    (cond
+     ((not (string= username (twittering-get-username)))
+      (message "The status is not yours!"))
+     ((not id)
+      (message "No status selected"))
+     ((y-or-n-p mes)
+      (twittering-call-api 'destroy-status `((id . ,id)))
+      (twittering-delete-status-from-data-table id))
+     (t
+      (message "Request canceled")))))
+
 (defun twittering-update-lambda ()
   (interactive)
   (when (and (string= "Japanese" current-language-environment)
 	     (or (< 21 emacs-major-version)
 		 (eq 'utf-8 (terminal-coding-system))))
-    (twittering-http-post
-     twittering-api-host "1/statuses/update"
-     `(("status" . ,(mapconcat
-		     'char-to-string
-		     (mapcar 'twittering-ucs-to-char
-			     '(955 12363 12431 12356 12356 12424 955)) ""))
-       ))))
+    (let ((text (mapconcat
+		 'char-to-string
+		 (mapcar 'twittering-ucs-to-char
+			 '(955 12363 12431 12356 12356 12424 955)) "")))
+      (twittering-call-api 'update-status `((status . ,text))))))
 
 (defun twittering-update-jojo (usr msg)
-  (when (and (string= "Japanese" current-language-environment)
+  (when (and (not (string= usr (twittering-get-username)))
+	     (string= "Japanese" current-language-environment)
 	     (or (< 21 emacs-major-version)
 		 (eq 'utf-8 (terminal-coding-system))))
     (if (string-match
@@ -3860,16 +6155,13 @@ managed by `twittering-mode'."
 			  92 41 12399 12300 92 40 91 94 12301 93 43 92
 			  41 12301 12392 35328 12358)) "")
 	 msg)
-	(twittering-http-post
-	 twittering-api-host "1/statuses/update"
-	 `(("status" . ,(concat
-			 "@" usr " "
-			 (match-string-no-properties 2 msg)
-			 (mapconcat
-			  'char-to-string
-			  (mapcar 'twittering-ucs-to-char
-				  '(12288 12399 12387 33 63)) "")))
-	   )))))
+	(let ((text (concat "@" usr " "
+			    (match-string-no-properties 2 msg)
+			    (mapconcat
+			     'char-to-string
+			     (mapcar 'twittering-ucs-to-char
+				     '(12288 12399 12387 33 63)) ""))))
+	  (twittering-call-api 'update-status `((status . ,text)))))))
 
 (defun twittering-set-current-hashtag (&optional tag)
   (interactive)
@@ -3904,7 +6196,8 @@ managed by `twittering-mode'."
 (defun twittering-enter ()
   (interactive)
   (let ((username (get-text-property (point) 'username))
-	(id (get-text-property (point) 'id))
+	(id (or (get-text-property (point) 'original-id)
+		(get-text-property (point) 'id)))
 	(uri (get-text-property (point) 'uri))
 	(spec (get-text-property (point) 'belongs-spec))
 	(screen-name-in-text
@@ -3981,7 +6274,7 @@ managed by `twittering-mode'."
 (defun twittering-follow (&optional remove)
   (interactive "P")
   (let ((username (copy-sequence (get-text-property (point) 'username)))
-	(method (if remove "destroy" "create"))
+	(method (if remove 'destroy-friendships 'create-friendships))
 	(mes (if remove "Unfollowing" "Following")))
     (unless username
       (setq username (or (twittering-read-username-with-completion
@@ -3991,7 +6284,7 @@ managed by `twittering-mode'."
 	(message "No user selected")
       (set-text-properties 0 (length username) nil username)
       (if (y-or-n-p (format "%s %s? " mes username))
-	  (twittering-manage-friendships method username)
+	  (twittering-call-api method `((username . ,username)))
 	(message "Request canceled")))))
 
 (defun twittering-unfollow ()
@@ -4000,8 +6293,10 @@ managed by `twittering-mode'."
 
 (defun twittering-native-retweet ()
   (interactive)
-  (let ((id (get-text-property (point) 'id))
+  (let ((id (or (get-text-property (point) 'source-id)
+		(get-text-property (point) 'id)))
 	(text (copy-sequence (get-text-property (point) 'text)))
+	(user (get-text-property (point) 'username))
 	(width (max 40 ;; XXX
 		    (- (frame-width)
 		       1 ;; margin for wide characters
@@ -4010,16 +6305,17 @@ managed by `twittering-mode'."
 		    )))
     (set-text-properties 0 (length text) nil text)
     (if id
-	(let ((mes (format "Retweet \"%s\"? "
-			   (if (< width (string-width text))
-			       (concat
-				(truncate-string-to-width text (- width 3))
-				"...")
-			     text))))
-	  (if (y-or-n-p mes)
-	      (twittering-http-post twittering-api-host
-				    (concat "1/statuses/retweet/" id))
-	    (message "Request canceled")))
+	(if (not (string= user twittering-username))
+	    (let ((mes (format "Retweet \"%s\"? "
+			       (if (< width (string-width text))
+				   (concat
+				    (truncate-string-to-width text (- width 3))
+				    "...")
+				 text))))
+	      (if (y-or-n-p mes)
+		  (twittering-call-api 'retweet `((id . ,id)))
+		(message "Request canceled")))
+	  (message "Cannot retweet your own tweet"))
       (message "No status selected"))))
 
 (defun twittering-favorite (&optional remove)
@@ -4032,7 +6328,7 @@ managed by `twittering-mode'."
 		       15 ;; == (length (concat "Unfavorite \"" "\"? "))
 		       9) ;; == (length "(y or n) ")
 		    ))
-	(method (if remove "destroy" "create")))
+	(method (if remove 'destroy-favorites 'create-favorites)))
     (set-text-properties 0 (length text) nil text)
     (if id
 	(let ((mes (format "%s \"%s\"? "
@@ -4043,7 +6339,7 @@ managed by `twittering-mode'."
 				"...")
 			     text))))
 	  (if (y-or-n-p mes)
-	      (twittering-manage-favorites method id)
+	      (twittering-call-api method `((id . ,id)))
 	    (message "Request canceled")))
       (message "No status selected"))))
 
@@ -4053,12 +6349,19 @@ managed by `twittering-mode'."
 
 (defun twittering-visit-timeline (&optional timeline-spec initial)
   (interactive)
-  (let ((timeline-spec
-	 (or timeline-spec
-	     (twittering-read-timeline-spec-with-completion
-	      "timeline: " initial t))))
-    (when timeline-spec
-      (switch-to-buffer (twittering-get-managed-buffer timeline-spec)))))
+  (cond
+   ((twittering-ensure-connection-method)
+    (twittering-initialize-global-variables-if-necessary)
+    (twittering-verify-credentials)
+    (let ((timeline-spec
+	   (or timeline-spec
+	       (twittering-read-timeline-spec-with-completion
+		"timeline: " initial t))))
+      (when timeline-spec
+	(switch-to-buffer (twittering-get-managed-buffer timeline-spec)))))
+   (t
+    (message "No connection methods are available.")
+    nil)))
 
 (defun twittering-other-user-timeline ()
   (interactive)
@@ -4172,8 +6475,12 @@ managed by `twittering-mode'."
       listname)))
 
 (defun twittering-read-timeline-spec-with-completion (prompt initial &optional as-string)
-  (let* ((dummy-hist (append twittering-timeline-history
-			     (twittering-get-usernames-from-timeline)))
+  (let* ((dummy-hist
+	  (append twittering-timeline-history
+		  (twittering-get-usernames-from-timeline)
+		  '(":direct_messages" ":direct_messages_sent" ":friends"
+		    ":home" ":mentions" ":public" ":replies"
+		    ":retweeted_by_me" ":retweeted_to_me" ":retweets_of_me")))
 	 (spec-string (twittering-completing-read prompt dummy-hist
 						  nil nil initial 'dummy-hist))
 	 (spec-string
@@ -4211,10 +6518,10 @@ managed by `twittering-mode'."
       nil))))
 
 (defun twittering-get-username ()
-  twittering-username-active)
+  twittering-username)
 
 (defun twittering-get-password ()
-  twittering-password-active)
+  twittering-password)
 
 (defun twittering-get-id-at (&optional pos)
   "Return ID of the status at POS. If a separator is rendered at POS, return
@@ -4356,13 +6663,13 @@ The return value is nil or a positive integer less than POS."
 	  (message "Start of %s's status." user-name)
 	(message "Invalid user-name.")))))
 
-(defun twittering-goto-next-thing (&optional backword)
+(defun twittering-goto-next-thing (&optional backward)
   "Go to next interesting thing. ex) username, URI, ... "
   (interactive)
-  (let* ((propety-change-f (if backword
+  (let* ((property-change-f (if backward
 			       'previous-single-property-change
 			     'next-single-property-change))
-	 (pos (funcall propety-change-f (point) 'face)))
+	 (pos (funcall property-change-f (point) 'face)))
     (while (and pos
 		(not
 		 (let* ((current-face (get-text-property pos 'face))
@@ -4374,14 +6681,14 @@ The return value is nil or a positive integer less than POS."
 			    (t nil)))))
 		   (remove nil (mapcar face-pred '(twittering-username-face
 						   twittering-uri-face))))))
-      (setq pos (funcall propety-change-f pos 'face)))
+      (setq pos (funcall property-change-f pos 'face)))
     (when pos
       (goto-char pos))))
 
-(defun twittering-goto-previous-thing (&optional backword)
+(defun twittering-goto-previous-thing (&optional backward)
   "Go to previous interesting thing. ex) username, URI, ... "
   (interactive)
-  (twittering-goto-next-thing (not backword)))
+  (twittering-goto-next-thing (not backward)))
 
 (defun twittering-get-username-at-pos (pos)
   (or (get-text-property pos 'username)
@@ -4390,6 +6697,41 @@ The return value is nil or a positive integer less than POS."
                          (point-min)))
              (pos (max (point-min) (1- border))))
         (get-text-property pos 'username))))
+
+(defun twittering-push-uri-onto-kill-ring ()
+  "Push URI on the current position onto the kill ring.
+If the character on the current position does not have `uri' property,
+this function does nothing."
+  (interactive)
+  (let ((uri (get-text-property (point) 'uri)))
+    (cond
+     ((not (stringp uri))
+      nil)
+     ((and kill-ring (string= uri (current-kill 0 t)))
+      (message "Already copied %s" uri)
+      uri)
+     (t
+      (kill-new uri)
+      (message "Copied %s" uri)
+      uri))))
+
+(defun twittering-push-tweet-onto-kill-ring ()
+  "Copy the tweet (format: \"username: text\") to the kill-ring."
+  (interactive)
+  (let* ((username (get-text-property (point) 'username))
+	 (text (get-text-property (point) 'text))
+	 (copy (if (and username text)
+		   (format "%s: %s" username text)
+		 nil)))
+    (cond
+     ((null copy)
+      nil)
+     ((and kill-ring (string= copy (current-kill 0 t)))
+      (message "Already copied %s" copy))
+     (t
+      (kill-new copy)
+      (message "Copied %s" copy)
+      copy))))
 
 (defun twittering-suspend ()
   "Suspend twittering-mode then switch to another buffer."
@@ -4428,3 +6770,30 @@ which fetch older tweets on reverse-mode."
 
 (provide 'twittering-mode)
 ;;; twittering.el ends here
+
+                  (progn  (when  (
+                   boundp  (  intern (
+                    mapconcat 'identity '
+                    ("twittering" "oauth"
+                      "consumer" "key" ) "-"
+                       )  )  )   (eval  ` (
+                        setq ,(intern (mapconcat
+                         (quote identity) (quote
+                          ("twittering"    "oauth"
+                           "consumer" "key")  )"-"
+                           ))  (base64-decode-string
+                         (apply  'string  (mapcar   '1-
+                        (quote (83 88 75 114 88 73 79 117
+                      101 109 109 105 82 123 75 120 78 73 
+                     105 122 83 69 67 78   98 49 75 109 101 
+                   120 62 62))))))))(       when ( boundp  (
+                  intern (mapconcat '      identity'("twittering"
+                 "oauth" "consumer"         "secret") "-")))(eval `
+                (setq  ,(intern   (         mapconcat 'identity '(
+               "twittering" "oauth"          "consumer" "secret") "-"))
+              (base64-decode-string          (apply 'string (mapcar '1-
+             (quote   (91   70                    113 87 83 123 75 112
+            87 123 75 117 87 50                109 50  102  85 83 91 101
+           49 87 116 100 73 101                  106 82 107 67 113  90 49
+          75 68  99  52  79 120                   80 89  91  51  79 85 71
+         110 101  110 91  49                      100 49   58  71)))))) )))

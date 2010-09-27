@@ -1,0 +1,8 @@
+# set PATH so it includes user's private bin if it exists
+[ -d ~/bin ] && PATH="${PATH}":~/bin
+[ -d ~/local/bin ] && PATH="${PATH}":~/local/bin
+fi
+
+# make java apps sane
+_JAVA_OPTIONS="$_JAVA_OPTIONS -Dawt.useSystemAAFontSettings=on"
+

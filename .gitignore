@@ -15,3 +15,4 @@ auto-save-list
 tags
 ._*
 .emacs.d/auto-install/*
+.xmonad/*

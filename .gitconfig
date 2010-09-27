@@ -1,0 +1,12 @@
+[user]
+	email = lurdan@gmail.com
+	name = KURASHIKI Satoru
+[color]
+	branch = auto
+	diff = auto
+	interactive = auto
+	status = auto
+	pager = false
+[alias]
+	co = checkout
+

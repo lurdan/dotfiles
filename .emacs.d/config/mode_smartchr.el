@@ -1,0 +1,6 @@
+;(auto-install-from-url "https://github.com/imakado/emacs-smartchr/raw/master/smartchr.el")
+(require 'smartchr)
+(global-set-key (kbd "=") (smartchr '("=" " = " " == " " === ")))
+(global-set-key (kbd ">") (smartchr '(">" " => " " => '`!!''" " => \"`!!'\"")))
+;(define-key cperl-mode-map (kbd "M") (smartchr '("M" "my $`!!'  =  " "my ($self, $`!!')  =  @_;" "my @`!!'  =  ")))
+;(global-set-key (kbd "F") (smartchr '("F" "$" "$_" "$_->" "@$")))

@@ -90,6 +90,12 @@
 (setq next-line-add-newlines nil)
 (setq require-final-newline t)
 
+;; CUA に矩形選択をやらせる
+(cua-mode t)
+(setq cua-enable-cua-keys nil)
+(cua-selection-mode nil)
+
+
 ;;; iswitchb
 (require 'iswitchb)
 (iswitchb-mode 1)
@@ -122,9 +128,14 @@
 
 
 ;; chmod +x for shebang
-(add-hook
-  'after-save-hook
+(add-hook 'after-save-hook
   'executable-make-buffer-file-executable-if-script-p)
+
+;; 行末の空白を削除
+(add-hook 'before-save-hook 'delete-trailing-whitespace)
+
+
+
 
 ;; バックアップファイルの保存場所を指定
 (setq make-backup-files t)

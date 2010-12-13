@@ -65,6 +65,8 @@
 (load-safe "mode_multi-shell.el")
 (load-safe "mode_shell-history.el")
 
+(load-safe "mode_sequential-command.el")
+(load-safe "mode_smartchr.el")
 
 ;;;;;;;;;;
 ;;; migemo
